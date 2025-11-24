@@ -326,6 +326,7 @@ def update_peak_table(spectrum: MSData):
 
 
 def run_advanced_statistical_analysis_callback():
+    spectrum = get_global_msdata_ref()
     dpg.show_item("Fitting_indicator")
     dpg.set_value("stop_fitting_checkbox", False)
     dpg.hide_item("start_fitting_button")
@@ -341,6 +342,8 @@ def run_advanced_statistical_analysis_callback():
     dpg.show_item("start_fitting_button")
     dpg.hide_item("stop_fitting_checkbox")
     dpg.show_item("advanced_statistical_analysis_button")
+    if dpg.does_alias_exist("noise"):
+        dpg.delete_item("noise")
 
 
 def toggle_lorentzian_peak_model(sender, app_data):

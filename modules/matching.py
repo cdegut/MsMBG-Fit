@@ -453,107 +453,215 @@ def check_mass_difference(render_callback: RenderCallback):
         mw = dpg.get_value(f"molecular_weight_{k}")
         diff = mw - mw_set1
         dpg.set_value(f"MW_diff_{k}", f"d{diff}")
-    check_integral_ratio(render_callback)
+    check_integral_ratio()
 
 
-def check_integral_ratio(render_callback: RenderCallback):
-    for k in range(0, 10):
-        compare_to = int(dpg.get_value(f"compare_set_{k}"))
-        integral_set_to = []
-        integral_set_k = []
-        spectrum = get_global_msdata_ref()
+# def check_integral_ratio():
+#     for k in range(0, 10):
+#         compare_to = int(dpg.get_value(f"compare_set_{k}"))
+#         integral_set_to = []
+#         integral_set_k = []
+#         spectrum = get_global_msdata_ref()
+
+#         for peak in spectrum.peaks:
+#             if not spectrum.peaks[peak].fitted:
+#                 continue
+#             matched = spectrum.peaks[peak].matched_with
+#             if matched == []:
+#                 continue
+
+#             if matched[0].set == compare_to:
+#                 integral_set_to.append(
+#                     [
+#                         matched[0].charge,
+#                         spectrum.peaks[peak].integral,
+#                         spectrum.peaks[peak].se_integral,
+#                     ]
+#                 )
+#             if matched[0].set == k:
+#                 integral_set_k.append(
+#                     [
+#                         matched[0].charge,
+#                         spectrum.peaks[peak].integral,
+#                         spectrum.peaks[peak].se_integral,
+#                     ]
+#                 )
+
+#         ratios = []
+#         zs = []
+
+#         for z1, int_to, se_to in integral_set_to:
+#             for z2, int_k, se_k in integral_set_k:
+#                 if z1 == z2:
+#                     # Skip if denominator is zero or either integral is non-positive
+#                     if int_to <= 0 or int_k <= 0:
+#                         continue
+
+#                     ratio = int_k / int_to
+
+#                     # Calculate ratio SE using error propagation if both SEs are available and non-zero
+#                     if se_to > 0 and se_k > 0:
+#                         ratio_se = ratio * np.sqrt(
+#                             (se_to / int_to) ** 2 + (se_k / int_k) ** 2
+#                         )
+#                     else:
+#                         ratio_se = 0  # Mark as no SE available
+
+#                     ratios.append((ratio, ratio_se))
+#                     zs.append(z1)
+
+#         if len(ratios) > 0:
+#             # Extract ratio values and their standard errors
+#             ratio_values = np.array([r[0] for r in ratios])
+#             ratio_ses = np.array([r[1] for r in ratios])
+
+#             # Check for positive values before taking log
+#             if np.all(ratio_values > 0):
+#                 geometric_mean = np.exp(np.mean(np.log(ratio_values)))
+
+#                 # Calculate geometric mean SE
+#                 if np.any(ratio_ses == 0):
+#                     # If any SE is missing, use sample standard error of log-transformed values
+#                     geometric_mean_se = (
+#                         np.std(np.log(ratio_values), ddof=1)
+#                         * geometric_mean
+#                         / np.sqrt(len(ratio_values))
+#                     )
+#                 else:
+
+#                     # Combine both sources of uncertainty:
+#                     # 1. Measurement uncertainty (from error propagation)
+#                     # 2. Sample variance (between-ratio variability)
+
+#                     # Measurement uncertainty contribution
+#                     relative_ses = ratio_ses / ratio_values
+#                     measurement_var = np.mean(relative_ses**2)
+
+#                     # Sample variance contribution (variability between ratios)
+#                     sample_var = np.var(np.log(ratio_values), ddof=1) / len(
+#                         ratio_values
+#                     )
+
+#                     # Total variance is the sum (assuming independence)
+#                     total_var = measurement_var + sample_var
+
+#                     geometric_mean_se = geometric_mean * np.sqrt(total_var)
+
+#                 dpg.set_value(
+#                     f"Integral_ratio_{k}",
+#                     f"{geometric_mean:.2f} ± {geometric_mean_se:.2f} using {len(zs)} peaks",
+#                 )
+#             else:
+#                 print(f"Warning: Non-positive ratio values found for set {k}")
+#                 dpg.set_value(f"Integral_ratio_{k}", "Error: Invalid ratios")
+
+
+def check_integral_ratio():
+
+    max_set = dpg.get_value("nb_peak_series")
+    selected_sets = []
+    for k in range(0, max_set):
+        if dpg.get_value(f"compare_checkbox_{k}"):
+            selected_sets.append(k)
+    spectrum = get_global_msdata_ref()
+
+    ions_lists = [[]]
+    for peak_set in selected_sets:
+        ions_list = []
+        for peak in spectrum.peaks:
+            for match in spectrum.peaks[peak].matched_with:
+                if match.set == peak_set:
+                    ions_list.append(match.charge)
+        ions_lists.append(ions_list)
+
+    useful_ions = set(ions_lists[1]) if len(ions_lists) > 1 else set()
+    for ions in ions_lists[2:]:
+        useful_ions &= set(ions)
+
+    ratios: dict[int, list] = {}
+    for peak_set in selected_sets:
+        ratios[peak_set] = []
+
+    se_ratios: dict[int, list] = {}
+    for peak_set in selected_sets:
+        se_ratios[peak_set] = []
+
+    integral_data: dict[int, dict] = {}
+    for ion in useful_ions:
+        integral_data[ion] = {
+            "total_integral": 0,
+            "total_integral_error": 0,
+            "peaks": [],
+        }
 
         for peak in spectrum.peaks:
-            if not spectrum.peaks[peak].fitted:
-                continue
-            matched = spectrum.peaks[peak].matched_with
-            if matched == []:
-                continue
-
-            if matched[0].set == compare_to:
-                integral_set_to.append(
-                    [
-                        matched[0].charge,
-                        spectrum.peaks[peak].integral,
-                        spectrum.peaks[peak].se_integral,
-                    ]
-                )
-            if matched[0].set == k:
-                integral_set_k.append(
-                    [
-                        matched[0].charge,
-                        spectrum.peaks[peak].integral,
-                        spectrum.peaks[peak].se_integral,
-                    ]
-                )
-
-        ratios = []
-        zs = []
-
-        for z1, int_to, se_to in integral_set_to:
-            for z2, int_k, se_k in integral_set_k:
-                if z1 == z2:
-                    # Skip if denominator is zero or either integral is non-positive
-                    if int_to <= 0 or int_k <= 0:
-                        continue
-
-                    ratio = int_k / int_to
-
-                    # Calculate ratio SE using error propagation if both SEs are available and non-zero
-                    if se_to > 0 and se_k > 0:
-                        ratio_se = ratio * np.sqrt(
-                            (se_to / int_to) ** 2 + (se_k / int_k) ** 2
-                        )
-                    else:
-                        ratio_se = 0  # Mark as no SE available
-
-                    ratios.append((ratio, ratio_se))
-                    zs.append(z1)
-
-        if len(ratios) > 0:
-            # Extract ratio values and their standard errors
-            ratio_values = np.array([r[0] for r in ratios])
-            ratio_ses = np.array([r[1] for r in ratios])
-
-            # Check for positive values before taking log
-            if np.all(ratio_values > 0):
-                geometric_mean = np.exp(np.mean(np.log(ratio_values)))
-
-                # Calculate geometric mean SE
-                if np.any(ratio_ses == 0):
-                    # If any SE is missing, use sample standard error of log-transformed values
-                    geometric_mean_se = (
-                        np.std(np.log(ratio_values), ddof=1)
-                        * geometric_mean
-                        / np.sqrt(len(ratio_values))
+            for match in spectrum.peaks[peak].matched_with:
+                if match.charge == ion and match.set in selected_sets:
+                    integral_data[ion]["total_integral"] += spectrum.peaks[
+                        peak
+                    ].integral
+                    integral_data[ion]["total_integral_error"] += (
+                        spectrum.peaks[peak].se_integral ** 2
                     )
-                else:
+                    integral_data[ion]["peaks"].append(peak)
 
-                    # Combine both sources of uncertainty:
-                    # 1. Measurement uncertainty (from error propagation)
-                    # 2. Sample variance (between-ratio variability)
+        integral_data[ion]["total_integral_error"] = (
+            integral_data[ion]["total_integral_error"] ** 0.5
+        )
 
-                    # Measurement uncertainty contribution
-                    relative_ses = ratio_ses / ratio_values
-                    measurement_var = np.mean(relative_ses**2)
+        for peak in integral_data[ion]["peaks"]:
+            peak_integral = spectrum.peaks[peak].integral
+            peak_se = spectrum.peaks[peak].se_integral
+            total_integral = integral_data[ion]["total_integral"]
+            total_se = integral_data[ion]["total_integral_error"]
 
-                    # Sample variance contribution (variability between ratios)
-                    sample_var = np.var(np.log(ratio_values), ddof=1) / len(
-                        ratio_values
-                    )
+            # Calculate the ratio
+            ratio = peak_integral / total_integral
 
-                    # Total variance is the sum (assuming independence)
-                    total_var = measurement_var + sample_var
+            # Propagate the error for the ratio
+            se_error = (
+                ratio
+                * ((peak_se / peak_integral) ** 2 + (total_se / total_integral) ** 2)
+                ** 0.5
+            )
 
-                    geometric_mean_se = geometric_mean * np.sqrt(total_var)
+            for match in spectrum.peaks[peak].matched_with:
+                if match.set in selected_sets:
+                    ratios[match.set].append(ratio)
+                    se_ratios[match.set].append(se_error)
 
-                dpg.set_value(
-                    f"Integral_ratio_{k}",
-                    f"{geometric_mean:.2f} ± {geometric_mean_se:.2f} using {len(zs)} peaks",
-                )
-            else:
-                print(f"Warning: Non-positive ratio values found for set {k}")
-                dpg.set_value(f"Integral_ratio_{k}", "Error: Invalid ratios")
+    for peak_set in selected_sets:
+        geo_mean, error = calculate_geometric_mean_se(
+            ratios[peak_set], se_ratios[peak_set]
+        )
+        dpg.set_value(
+            f"Integral_ratio_{peak_set}",
+            f"{geo_mean:.2f} ± {error:.3f} using {len(ratios[peak_set])} ions",
+        )
+
+
+def calculate_geometric_mean_se(ratios, se_ratios):
+    # Ensure ratios and se_ratios are numpy arrays
+    ratios = np.array(ratios)
+    se_ratios = np.array(se_ratios)
+
+    log_ratios = np.log(ratios)
+    geo_mean = np.exp(np.mean(log_ratios))
+
+    # Measurement uncertainty contribution
+    relative_ses = se_ratios / ratios
+    measurement_var = np.mean(relative_ses**2)
+
+    # Sample variance contribution
+    sample_var = np.var(log_ratios, ddof=1) / len(ratios)
+
+    # Total variance
+    total_var = measurement_var + sample_var
+
+    # Standard error of the geometric mean
+    geo_mean_se = geo_mean * np.sqrt(total_var)
+
+    return geo_mean, geo_mean_se
 
 
 def print_to_terminal():
@@ -595,10 +703,10 @@ def print_to_terminal():
         ordered_peaks = sorted(
             peaks, key=lambda x: x["matched_with"].charge, reverse=True
         )
-        print("Peak:\t\tz:\t\tM/Z:\t\tx0:\t\tIntegral:\t\tIntegralError\t\tBase:")
+        print("Peak:\t\tz:\t\tM/Z:\t\tx0:\t\tBase:\t\tIntegral:\t\tIntegralError")
         for p in ordered_peaks:
             print(
-                f"{p['peak']}\t\t{p['matched_with'].charge}\t\t{p['matched_with'].mw/p['matched_with'].charge:.2f}\t\t{p['x0']:.2f}\t\t{p['integral']:.2f}\t\t{p['base']:.2f}\t\t{p['se_integral']:.2f}"
+                f"{p['peak']}\t\t{p['matched_with'].charge}\t\t{p['matched_with'].mw/p['matched_with'].charge:.2f}\t\t{p['x0']:.2f}\t\t{p['base']:.2f}\t\t{p['integral']:.2f}\t\t{p['se_integral']:.2f}"
             )
 
 

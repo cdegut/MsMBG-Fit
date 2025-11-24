@@ -1,3 +1,4 @@
+from _collections_abc import dict_keys
 from typing import List, Literal, Optional
 from pybaselines import Baseline
 from scipy.signal import medfilt
@@ -213,16 +214,28 @@ class MSData:
         with open(path, "wb") as f:
             pickle.dump(self, f)
 
-    def get_packed_parameters(self) -> List[float]:
+    def get_packed_parameters(
+        self, integral=False, ordered=False
+    ) -> Tuple[List[float], List[int]]:
         packed_params = []
-        for peak in self.peaks:
+        ordered_peaks_list: List[int] = (
+            sorted(self.peaks.keys(), key=lambda peak: self.peaks[peak].x0_init)
+            if ordered
+            else list(self.peaks.keys())
+        )
+
+        for peak in ordered_peaks_list:
             if self.peaks[peak].do_not_fit:
                 continue
-            packed_params.append(self.peaks[peak].A_refined)
+
+            if integral:
+                packed_params.append(self.peaks[peak].integral)
+            else:
+                packed_params.append(self.peaks[peak].A_refined)
             packed_params.append(self.peaks[peak].x0_refined)
             packed_params.append(self.peaks[peak].sigma_L)
             packed_params.append(self.peaks[peak].sigma_R)
-        return packed_params
+        return packed_params, ordered_peaks_list
 
     # @staticmethod
     # def load_from_file(path: str) -> "MSData":

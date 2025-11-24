@@ -6,7 +6,7 @@ from typing import Tuple
 from scipy.signal import find_peaks
 import numpy as np
 from modules.utils import log
-from modules.rendercallback import RenderCallback
+from modules.rendercallback import RenderCallback, get_global_render_callback_ref
 from modules.finding_callback import get_smoothing_window
 
 
@@ -249,6 +249,7 @@ def peaks_clear_callback(sender, app_data, user_data: RenderCallback):
         peak_to_delete.append(old_peak)
     for peak in peak_to_delete:
         del spectrum.peaks[peak]
+    update_found_peaks_table(user_data=get_global_render_callback_ref())
     draw_found_peaks(spectrum)
 
 
@@ -377,8 +378,8 @@ def peaks_finder(
             local_region_x[local_max_idx] + spectrum.working_data[peak, 0]
         ) / 2
 
-        if use_derivative2nd:
-            width = width * 2  # 2nd derivative makes peaks thinner
+        # if use_derivative2nd:
+        #     width = width * 2  # 2nd derivative makes peaks thinner
 
         new_peak = peak_params(
             A_init=A_init, x0_init=float(corrected_x0_init), width=width

@@ -175,7 +175,7 @@ def refine_peak_parameters(
     k = 0
     sigma_L_mean, sigma_R_mean, sigma_L_std, sigma_R_std = -1, -1, -1, -1
     theta_new = None
-    theta_old = spectrum.get_packed_parameters()
+    theta_old, peak_list = spectrum.get_packed_parameters()
     delta_theta = 0
     theta_converged = False
     metric_history = []
@@ -269,7 +269,7 @@ def refine_peak_parameters(
                 widths=widths,
                 alpha=alpha_convergence,
             )
-        theta_new = spectrum.get_packed_parameters()
+        theta_new, peak_list = spectrum.get_packed_parameters()
 
     ##############################
     # End of iteration loop

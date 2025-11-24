@@ -16,6 +16,20 @@ def multi_bi_gaussian(x, *params):
     return y
 
 
+def multi_bi_gaussian_using_I(x, *params):
+    n_peaks = len(params) // 4
+    y = np.zeros_like(x, dtype=float)
+    for i in range(n_peaks):
+        I, x0, sigma_L, sigma_R = params[i * 4 : (i + 1) * 4]
+        A = I / (np.sqrt(2 * np.pi) * (sigma_L + sigma_R) / 2)
+        y += np.where(
+            x < x0,
+            A * np.exp(-((x - x0) ** 2) / (2 * sigma_L**2)),
+            A * np.exp(-((x - x0) ** 2) / (2 * sigma_R**2)),
+        )
+    return y
+
+
 # Define bi-Gaussian function
 def bi_gaussian(x, A, x0, sigma_L, sigma_R):
     return np.where(

@@ -7,6 +7,7 @@ from modules.matching import (
     redraw_blocks,
     print_to_terminal,
     refine_matching,
+    check_integral_ratio,
 )
 from modules.data_structures import get_global_msdata_ref
 from modules.var import colors_list
@@ -166,6 +167,12 @@ def peak_matching_window(render_callback: RenderCallback, i):
                 user_data=i,
             )
         dpg.add_text("", tag=f"MW_diff_{i}")
+        dpg.add_checkbox(
+            default_value=False,
+            tag=f"compare_checkbox_{i}",
+            callback=compare_integral_callback,
+            label="Use for comparison",
+        )
         dpg.add_text("GeoMean of integral ratios:")
         dpg.add_text("", tag=f"Integral_ratio_{i}")
 
@@ -233,3 +240,8 @@ def hide_blocks_line_callback(sender, app_data, user_data: RenderCallback):
     else:
         redraw_blocks()
         dpg.set_item_label("hide_lines_button", "Hide lines")
+
+
+def compare_integral_callback(sender, app_data, user_data):
+    check_integral_ratio()
+    return

@@ -95,6 +95,7 @@ def initialise_windows(render_callback):
         "use_2nd_derivative_checkbox",
         spectrum.peak_detection_parameters["use_2nd_derivative"],
     )
+    dpg.set_value("use_lorentzian_checkbox", spectrum.peak_model == "lorentzian")
     redraw_user_peaks(render_callback)
     data_clipper()
     update_peak_starting_points(spectrum)

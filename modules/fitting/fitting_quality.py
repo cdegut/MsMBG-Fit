@@ -15,6 +15,7 @@ from modules.math import (
     bi_Lorentzian_integral,
     bi_gaussian_integral,
     multi_bi_gaussian,
+    multi_bi_gaussian_using_I,
     standard_error,
     check_theta_convergence,
 )
@@ -296,13 +297,17 @@ def advanced_statistical_analysis(
             )
             if dpg.does_alias_exist("noise"):
                 dpg.delete_item("noise")
+
+            noise = np.random.normal(
+                0, sigma_hat, size=len(spectrum.working_data[:, 0])
+            )
+
+            noise = noise + np.median(data_y)
             dpg.add_line_series(
-                x=residuals.tolist(),
-                y=(np.random.normal(0, sigma_hat, size=len(residuals)) + 250).tolist(),
-                label="MBG",
+                spectrum.working_data[:, 0].tolist(),
+                noise.tolist(),
                 parent="y_axis_plot2",
-                tag="noise",
-                show=False,
+                tag=f"noise",
             )
 
             mini_batch = []
@@ -374,6 +379,23 @@ def advanced_statistical_analysis(
                     else ""
                 ),
             )
+
+            if method == "bootstrap-parametric":
+
+                if dpg.does_alias_exist("noise"):
+                    dpg.delete_item("noise")
+
+                noise = np.random.normal(
+                    0, sigma_hat, size=len(spectrum.working_data[:, 0])
+                )
+
+                noise = noise + y_fitted
+                dpg.add_line_series(
+                    spectrum.working_data[:, 0].tolist(),
+                    noise.tolist(),
+                    parent="y_axis_plot2",
+                    tag=f"noise",
+                )
 
         task_pool = []
         for b in range(start_idx, end_idx):
@@ -562,7 +584,7 @@ def quick_fit_model(
         quality_metrics: Optional[FitQualityMetricsReduced] = None
         # Run a quick refinement (fewer iterations for speed)
         for iteration in range(n_iterations):
-            old_theta = spectrum.get_packed_parameters()
+            old_theta, peak_list = spectrum.get_packed_parameters()
             random_list = np.random.permutation(list(working_peaks.keys()))
             if width_regularization and quality_metrics:
                 widths = (
@@ -598,7 +620,7 @@ def quick_fit_model(
                     rmse_converged = quality_metrics.weighted_rmse < wRMSE_threshold
 
                 if check_convergence == "theta-gradient" or check_convergence == "both":
-                    new_theta = spectrum.get_packed_parameters()
+                    new_theta, peak_list = spectrum.get_packed_parameters()
                     theta_converged, delta_theta = check_theta_convergence(
                         old_theta,
                         new_theta,
@@ -798,152 +820,226 @@ def _make_initial_refit_task(
     return task
 
 
-def laplace_covariance_analysis():
-    spectrum = get_global_msdata_ref()
-    theta_hat = spectrum.get_packed_parameters()
+def laplace_covariance_analysis(log_params=True):
+    spectrum: MSData = get_global_msdata_ref()
+    theta_hat, peak_list = spectrum.get_packed_parameters(integral=True, ordered=True)
+    theta_hat = np.asarray(theta_hat)
     x = spectrum.working_data[:, 0]
     y = spectrum.working_data[:, 1]
-    # --- residuals and jacobian ---
-    residuals = y - multi_bi_gaussian(x, theta_hat)
-    N, P = len(y), len(theta_hat)
-
-    sigma_est = np.sqrt(np.sum(residuals**2) / (N - P))
-
-    # finite-diff Jacobian
-    eps = 1e-6
-    jac = np.zeros((N, P))
-    f0 = multi_bi_gaussian(x, *theta_hat)
-    for j in range(P):
-        dtheta = np.zeros_like(theta_hat)
-        dtheta[j] = eps * max(1.0, abs(theta_hat[j]))
-        f1 = multi_bi_gaussian(x, theta_hat + dtheta)
-        jac[:, j] = (f1 - f0) / dtheta[j]
-
-    # --- Laplace covariance ---
-    JTJ = jac.T @ jac
-    cond_number = np.linalg.cond(JTJ)
-    cov = sigma_est**2 * np.linalg.pinv(JTJ)
-    stderr = np.sqrt(np.diag(cov))
-
-    warnings = []
-    if cond_number > 1e8:
-        warnings.append(f"Ill-conditioned fit: cond(J^T J) = {cond_number:.2e}")
-    if np.any(np.isnan(stderr)) or np.any(stderr > 1e3 * np.abs(theta_hat)):
-        warnings.append(
-            "Unrealistic parameter uncertainties (possible singular Jacobian)"
-        )
-    analyze_laplace_svd(
-        jac,
-        theta_hat,
-        sigma_est,
-        theta_names=[f"p[{i}]" for i in range(P)],
-        verbose=True,
+    results = rolling_three_peak_quality(
+        model_func=multi_bi_gaussian_using_I,
+        theta_hat=theta_hat,
+        x=x,
+        y=y,
+        n_peaks=len(peak_list),
     )
+    for i, result in enumerate(results):
+        print(f"Peak {peak_list[i]} \n", f"Score: {result["score"]}")
 
 
-def analyze_laplace_svd(
-    jac,
-    theta_hat,
-    sigma_est,
-    theta_names=None,
-    rcond=None,
-    auto_rcond_factor=1e-8,
-    verbose=True,
-):
+def _peak_quality_score_from_J_local(J_local, rcond=1e-8, max_log_cond=20.0):
     """
-    Numerically stable Laplace covariance via scaled SVD with truncation.
-
-    Parameters
-    ----------
-    jac : (N, P) ndarray
-        Jacobian matrix of residuals wrt parameters (evaluated at best fit).
-    theta_hat : (P,) ndarray
-        Best-fit parameter vector.
-    sigma_est : float
-        Residual RMS (sqrt(mean(residuals^2)) or equivalent noise estimate).
-    theta_names : list of str, optional
-        Names of parameters for diagnostics.
-    rcond : float or None
-        Relative singular-value cutoff for truncation (fraction of max s).
-        If None, automatically set to auto_rcond_factor.
-    auto_rcond_factor : float
-        Multiplier used if rcond=None; rcond = s[0] * auto_rcond_factor.
-    verbose : bool
-        Print diagnostics and top/bottom singular vector contributors.
-
-    Returns
-    -------
-    results : dict
-        {
-          'stderr'          : 1σ standard errors per parameter,
-          'cov'             : covariance matrix,
-          'scale'           : per-parameter scale factors used,
-          'singular_values' : singular values of scaled JTJ,
-          'effective_rank'  : number kept after truncation,
-          'rcond_used'      : cutoff used,
-          'bad_directions'  : list of (singval, vector) for truncated modes
+    Compute 0..100 score for a local Jacobian J_local (N x n_params_local).
+    Returns dict with components and message.
+    """
+    # SVD on J_local
+    if J_local.size == 0:
+        return {
+            "score": 0.0,
+            "rank_frac": 0.0,
+            "kept": 0,
+            "cond": np.inf,
+            "cond_score": 0.0,
+            "max_abs_corr": 1.0,
+            "corr_score": 0.0,
+            "message": "no data",
+            "singular_values": np.array([]),
         }
-    """
-    N, P = jac.shape
-    if rcond is None:
-        rcond = auto_rcond_factor
 
-    # 1. Scale parameters to O(1)
-    scale = np.abs(theta_hat) + 1e-8
-    J_scaled = jac * scale[None, :]
+    U, svals, VT = np.linalg.svd(J_local, full_matrices=False)
+    svals = np.array(svals)
+    cond = float(svals[0] / (svals[-1] + 1e-30))
 
-    # 2. Compute scaled JTJ and its SVD
-    JTJ_s = J_scaled.T @ J_scaled
-    u, s, vh = np.linalg.svd(JTJ_s, full_matrices=True)
-    cond = s[0] / max(s[-1], 1e-30)
-    cutoff = s[0] * rcond
-    keep = s > cutoff
-    eff_rank = np.sum(keep)
-    dropped = np.where(~keep)[0]
+    # effective kept singular count by rcond threshold
+    cutoff = svals[0] * rcond
+    kept = int(np.sum(svals > cutoff))
 
-    # 3. Construct truncated pseudo-inverse
-    s_inv = np.zeros_like(s)
-    s_inv[keep] = 1.0 / s[keep]
-    JTJ_pinv_s = (vh.T * s_inv) @ u.T
+    # rank fraction normalized to 4 (we score per-peak later but pass generic)
+    # if n_params_local>4, we map kept-> fraction of 4 for the peak metric step
+    rank_frac = float(min(kept, 4)) / 4.0
 
-    # 4. Unscale back to original parameter units
-    cov = sigma_est**2 * (JTJ_pinv_s / (scale[:, None] * scale[None, :]))
-    stderr = np.sqrt(np.diag(cov))
+    # conditioning component
+    logc = np.log10(cond + 1e-30)
+    cond_score = 1.0 - np.clip(logc / max_log_cond, 0.0, 1.0)
 
-    if verbose:
-        print(f"\n=== Laplace-SVD Diagnostics ===")
-        print(f"cond(JTJ_scaled) : {cond:.3e}")
-        print(f"effective rank   : {eff_rank}/{P}")
-        print(f"rcond cutoff     : {rcond:.1e}")
-        print(f"σ_est            : {sigma_est:.3g}")
-        print(f"min/max singular : {s[-1]:.3e}, {s[0]:.3e}")
-        if eff_rank < P:
-            print(f"{P-eff_rank} near-null directions truncated.")
-        else:
-            print("No directions truncated.")
+    # correlation component: largest absolute off-diagonal correlation between columns
+    if J_local.shape[0] > 1 and J_local.shape[1] > 1:
+        C = np.corrcoef(J_local.T)
+        abs_corr = np.abs(C - np.eye(C.shape[0]))
+        max_abs_corr = float(np.max(abs_corr))
+    else:
+        max_abs_corr = 0.0
+    corr_score = 1.0 - np.clip(max_abs_corr, 0.0, 1.0)
 
-        # Identify top contributors to the worst directions
-        def show_contrib(v, title):
-            idx = np.argsort(np.abs(v))[::-1][:8]
-            print(f"\n  {title}")
-            for i in idx:
-                name = theta_names[i] if theta_names else f"p[{i}]"
-                print(f"    {name:>12s} : {v[i]: .3e}")
+    # weights (same as before)
+    w_rank = 0.50
+    w_cond = 0.30
+    w_corr = 0.20
+    combined = w_rank * rank_frac + w_cond * cond_score + w_corr * corr_score
+    score = float(np.clip(combined, 0.0, 1.0) * 100.0)
 
-        if len(dropped) > 0:
-            for k in dropped[:3]:  # show a few worst directions
-                v = vh.T[:, k]
-                show_contrib(v, f"Truncated mode #{k} (s={s[k]:.3e})")
-        print("=" * 35)
-
-    bad_dirs = [(s[k], vh.T[:, k]) for k in dropped]
+    # message
+    reasons = []
+    if kept < 4:
+        reasons.append(f"low effective rank ({kept})")
+    if cond_score < 0.5:
+        reasons.append(f"poor conditioning (cond≈{cond:.2e})")
+    if max_abs_corr > 0.8:
+        reasons.append(f"strong parameter correlation (corr≈{max_abs_corr:.2f})")
+    message = " ; ".join(reasons) if reasons else "well constrained"
 
     return {
-        "stderr": stderr,
-        "cov": cov,
-        "scale": scale,
-        "singular_values": s,
-        "effective_rank": eff_rank,
-        "rcond_used": rcond,
-        "bad_directions": bad_dirs,
+        "score": score,
+        "rank_frac": rank_frac,
+        "kept": kept,
+        "cond": cond,
+        "cond_score": cond_score,
+        "max_abs_corr": max_abs_corr,
+        "corr_score": corr_score,
+        "message": message,
+        "singular_values": svals,
     }
+
+
+def rolling_three_peak_quality(
+    model_func,
+    theta_hat,
+    x,
+    y,
+    n_peaks,
+    dlog=1e-3,
+    rcond=1e-8,
+    window_factor=1.5,
+):
+    """
+    Compute a per-peak quality score using a 3-peak rolling window.
+    - model_func: f(x, *theta)
+    - theta_hat: full packed parameter vector (len = 4*n_peaks)
+    - x, y: data arrays
+    - n_peaks: number of peaks
+    Returns: list of dicts length n_peaks with entries:
+      {
+        'score': 0..100,
+        'message': str,
+        'stderr_I': float,
+        'I': float,
+        'Cov_local': 4x4 marginal covariance for central peak,
+        'block_svals': array of SVD singular values for block,
+        'block_kept': int,
+        'block_cond': float,
+        'block_indices': list of peak indices in block
+      }
+    """
+    results = []
+    P = len(theta_hat)
+    assert P == 4 * n_peaks, "theta_hat length mismatch"
+
+    # Precompute full model baseline once
+    f0 = model_func(x, *theta_hat)
+    N = len(x)
+
+    for center in range(n_peaks):
+        # define block: center-1, center, center+1 (clipped)
+        block_peaks = [i for i in (center - 1, center, center + 1) if 0 <= i < n_peaks]
+        n_block = len(block_peaks)
+        idxs = []
+        for p in block_peaks:
+            idxs.extend(list(range(p * 4, p * 4 + 4)))  # global param indices for block
+
+        # choose mask covering union of blocks, local window factor aggregated
+        x0s = [theta_hat[p * 4 + 1] for p in block_peaks]
+        sLs = [theta_hat[p * 4 + 2] for p in block_peaks]
+        sRs = [theta_hat[p * 4 + 3] for p in block_peaks]
+        width = max([sLs[i] + sRs[i] for i in range(n_block)] + [1.0])
+        mask = np.zeros_like(x, dtype=bool)
+        for x0 in x0s:
+            mask |= (x >= x0 - window_factor * width) & (
+                x <= x0 + window_factor * width
+            )
+        if mask.sum() < 6:
+            mask = slice(None)  # use full data if local too small
+
+        # Build block Jacobian J_block (rows = mask.sum(), cols = 4*n_block)
+        rows = x[mask] if not isinstance(mask, slice) else x
+        f0_block = f0[mask] if not isinstance(mask, slice) else f0
+        J_block = np.zeros((len(rows), 4 * n_block))
+        for col_idx, gidx in enumerate(idxs):
+            step = theta_hat[gidx] * dlog
+            if step == 0:
+                step = dlog
+            theta_step = theta_hat.copy()
+            theta_step[gidx] = theta_hat[gidx] + step
+            f1 = model_func(x, *theta_step)
+            f1_block = f1[mask] if not isinstance(mask, slice) else f1
+            J_block[:, col_idx] = (f1_block - f0_block) / step
+
+        # SVD and truncated pseudo-inverse for block covariance
+        U, svals_block, VT = np.linalg.svd(J_block, full_matrices=False)
+        cutoff = svals_block[0] * rcond
+        kept_block = int(np.sum(svals_block > cutoff))
+        s_inv = np.zeros_like(svals_block)
+        s_inv[svals_block > cutoff] = 1.0 / svals_block[svals_block > cutoff]
+        JTJ_pinv_block = (
+            VT.T * s_inv
+        ) @ U.T  # pseudo-inverse of J_block (since SVD on J)
+        # Convert to parameter covariance: Cov_block = sigma^2 * (J^T J)^+ = sigma^2 * JTJ_pinv_block
+        # Need sigma estimate (use global residuals if available)
+        residuals = y - f0
+        sigma_est = np.sqrt(np.sum(residuals**2) / max(1, (N - len(theta_hat))))
+        Cov_block = (sigma_est**2) * JTJ_pinv_block
+
+        # Extract marginal covariance for the central peak within block
+        # Find local offset of center in block_peaks
+        center_pos_in_block = block_peaks.index(center)
+        local_base = center_pos_in_block * 4
+        Cov_local = Cov_block[local_base : local_base + 4, local_base : local_base + 4]
+
+        # Compute integral and stderr_I depending on paramization
+        # We must detect whether model_func expects amplitude or integral first param.
+        # We assume theta ordering is [I/x, x0, sL, sR]; user should ensure consistency.
+        I_val = theta_hat[center * 4 + 0]
+        stderr_I = np.sqrt(max(Cov_local[0, 0], 0.0))
+
+        # Build J_local for scoring: use block's columns restricted to central peak columns
+        # This gives columns with the same scaling as used in the block
+        cols_local = list(range(center_pos_in_block * 4, center_pos_in_block * 4 + 4))
+        J_local = J_block[:, cols_local]
+
+        # compute the lightweight quality score for this central peak from its local block info
+        score_dict = _peak_quality_score_from_J_local(J_local, rcond=rcond)
+
+        # Overwrite kept to reflect block-kept if that is more informative
+        score_dict["block_svals"] = svals_block
+        score_dict["block_kept"] = kept_block
+        score_dict["block_cond"] = float(svals_block[0] / (svals_block[-1] + 1e-30))
+        score_dict["block_peaks"] = block_peaks
+        score_dict["Cov_local"] = Cov_local
+        score_dict["I"] = float(I_val)
+        score_dict["stderr_I"] = float(stderr_I)
+
+        cond_block = svals_block[0] / (svals_block[-1] + 1e-30)
+        logc = np.log10(cond_block)
+        # sigmoid from 0 (good) to 1 (bad) between cond 1e6–1e10
+        p = 1 / (1 + np.exp(-(logc - 8) / 0.8))
+        score_dict["score"] *= 1 - 0.8 * p
+        score_dict["overlap_penalty"] = p
+        score_dict["block_cond"] = cond_block
+
+        # Friendly message tweak: if block shows strong cross-coupling (kept_block < 4*n_block)
+        if kept_block < 4 * n_block:
+            score_dict["message"] = (
+                score_dict.get("message", "") + f"; block rank {kept_block}/{4*n_block}"
+            )
+        results.append(score_dict)
+
+    return results

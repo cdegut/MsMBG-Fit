@@ -22,7 +22,7 @@ def refine_iteration(
     # Check for overlap with neighbors and limit refinement
     min_neighbor_distance = float("inf")
     for other_peak in spectrum.peaks:
-        if other_peak != peak:
+        if other_peak != peak and not spectrum.peaks[other_peak].do_not_fit:
             distance = abs(spectrum.peaks[other_peak].x0_refined - x0_fit)
             min_neighbor_distance = min(min_neighbor_distance, distance)
 
@@ -207,7 +207,7 @@ def refine_iteration(
         # Find all neighbors and their distances
         neighbors = []
         for close_peak in spectrum.peaks:
-            if close_peak != peak:
+            if close_peak != peak and not spectrum.peaks[close_peak].do_not_fit:
                 distance = abs(spectrum.peaks[close_peak].x0_refined - x0_fit)
                 if distance < neighbor_distance:
                     neighbors.append(

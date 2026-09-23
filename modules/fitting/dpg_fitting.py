@@ -100,7 +100,7 @@ def fitting_window(render_callback):
                 dpg.add_text("OR Parameters changes below (*e-5):")
                 dpg.add_input_float(
                     label="",
-                    default_value=5,
+                    default_value=1,
                     step=1,
                     min_value=0.01,
                     width=200,

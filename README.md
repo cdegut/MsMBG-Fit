@@ -36,23 +36,25 @@ MsMBG-Fit is a Python application designed for analyzing mass spectrometry data 
     -   matplotlib
     -   seaborn
 
-### Setup
+### Setup with uv
 
-```powershell
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if it is not already available, then run:
+
+```shell
 # Clone the repository
 git clone https://github.com/cdegut/MsMBG-Fit.git
 cd MsMBG-Fit
 
-# Install dependencies
-pip install dearpygui numpy scipy scikit-learn pandas pybaselines whittaker_eilers matplotlib seaborn
+# Create the Python 3.13 environment and install the locked dependencies
+uv sync
 ```
 
 ## Usage
 
 ### Starting the Application
 
-```powershell
-python main.py
+```shell
+uv run python main.py
 ```
 
 ### Workflow

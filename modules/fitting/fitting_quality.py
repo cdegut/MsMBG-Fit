@@ -1,6 +1,7 @@
 from calendar import c
 from dataclasses import dataclass
 import os
+import time
 from typing import Dict, Literal, overload
 import numpy as np
 from sklearn import base
@@ -19,7 +20,6 @@ from modules.math import (
     bi_Lorentzian,
     bootstrap_std,
     combine_errors,
-    check_theta_convergence,
 )
 from modules.rendercallback import RenderCallback
 from modules.utils import log
@@ -30,6 +30,13 @@ from typing import Optional
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import multiprocessing
 from threading import Lock
+
+
+# Convergence of the refiner: parameters averaged over a window of iterations are
+# compared with the previous window, in units of their Laplace error bars.
+# Bootstrap refits start from the fitted solution and settle quickly.
+CONVERGENCE_WINDOW = 50
+BOOTSTRAP_CONVERGENCE_WINDOW = 10
 
 
 @dataclass
@@ -241,6 +248,12 @@ _worker_stop_event = None
 def _init_worker(stop_event):
     global _worker_stop_event
     _worker_stop_event = stop_event
+    try:  # one BLAS thread per worker: the refits already run in parallel
+        from threadpoolctl import threadpool_limits
+
+        threadpool_limits(1)
+    except ImportError:
+        pass
 
 
 def _stop_requested(render_callback) -> bool:
@@ -296,81 +309,29 @@ def advanced_statistical_analysis(
     completed_lock = Lock()
     completed_tasks = {"count": 0, "successful": 0, "rejected": 0}
     BATCH_SIZE = min(cpu_count * 2, 50)  # Process 4x CPU cores or max 50 at once
+    started = time.time()
+    label = "Refit with randomisation" if method == "initial" else "Bootstrap"
+
+    def show_progress(unfinished_in_batch: int):
+        elapsed = time.time() - started
+        count = completed_tasks["count"]
+        running = min(unfinished_in_batch, cpu_count)
+        text = (
+            f"{label}: {count}/{macro_iteration} done, {running} running, "
+            f"{int(elapsed // 60)} min {int(elapsed % 60):02d} s"
+        )
+        if count:
+            remaining = elapsed / count * (macro_iteration - count)
+            text += f", about {int(remaining // 60)} min {int(remaining % 60):02d} s left"
+        dpg.set_value("Fitting_indicator_sub_text", text)
     num_batches = (macro_iteration + BATCH_SIZE - 1) // BATCH_SIZE
 
     avg_iterations = None
     batch_iterations = []
     rescale = 1.0
 
-    if method == "bootstrap-parametric" or method == "bootstrap-residual":
-        it = 0
-        for test in range(0, 10):
-            dpg.set_value(
-                "Fitting_indicator_sub_text",
-                (
-                    f"Running initial rescale tests {test}/10 "
-                    + (f"last it: {it} rescale: {rescale:.2f}" if it else "")
-                ),
-            )
-            if dpg.does_alias_exist("noise"):
-                dpg.delete_item("noise")
-
-            noise = np.random.normal(
-                0, sigma_hat, size=len(spectrum.working_data[:, 0])
-            )
-
-            noise = noise + np.median(data_y)
-            dpg.add_line_series(
-                spectrum.working_data[:, 0].tolist(),
-                noise.tolist(),
-                parent="y_axis_plot2",
-                tag=f"noise",
-            )
-
-            mini_batch = []
-            for n in range(0, 4):
-                if _stop_requested(render_callback):
-                    log("Error analysis stopped by user.")
-                    return False
-                test_task = _make_bootstrap_task(
-                    spectrum=spectrum,
-                    working_peak_list=working_peak_list,
-                    data_x=data_x,
-                    method=method,
-                    b=test,
-                    y_fitted=y_fitted,
-                    wRMSE_threshold=wRMSE_threshold,
-                    residuals=residuals,
-                    sigma_hat=float(sigma_hat),
-                    rescale=rescale,
-                    micro_iteration=25,
-                    check_convergence=check_convergence,
-                    theta_threshold=theta_threshold,
-                )
-                _, _, it = execute_quick_fit(test_task)
-                mini_batch.append(it)
-                print(f"Initial rescale test {test} iteration {n}: {it} iterations")
-            it = int(np.mean(mini_batch))
-
-            if 5 > it < 10:
-                dpg.set_value(
-                    "Fitting_indicator_sub_text",
-                    (
-                        f"Running initial rescale tests {test}/10 "
-                        + (f"last it: {it} rescale: {rescale:.2f} exiting test now")
-                    ),
-                )
-                print("Exiting initial rescale tests early")
-                break
-            if it > 10:
-                rescale = rescale * 0.75
-            elif it > 24:
-                rescale = rescale * 0.5
-            elif it < 5:
-                rescale = rescale * 1.25
-            elif it <= 2:
-                rescale = rescale * 2.0
-
+    # Starting jitter of the bootstrap refits: fixed (it used to be tuned so that
+    # refits "converged" in a few iterations under the old parameter-change test)
     for batch_idx in range(num_batches):
         start_idx = batch_idx * BATCH_SIZE
         end_idx = min(start_idx + BATCH_SIZE, macro_iteration)
@@ -379,23 +340,13 @@ def advanced_statistical_analysis(
             avg_iterations = int(np.mean(batch_iterations))
             batch_iterations = []
 
-        if avg_iterations is not None:
-            if avg_iterations > 15:
-                rescale = rescale * 0.75
-            elif avg_iterations > 25:
-                rescale = rescale * 0.5
-            elif avg_iterations < 5:
-                rescale = rescale * 1.25
-            elif avg_iterations <= 2:
-                rescale = rescale * 2.0
-
         if render_callback:
             dpg.set_value(
                 "Fitting_indicator_sub_text",
                 (
                     f"Running {start_idx} to {end_idx}"
-                    + f" average iter last batch: {avg_iterations} rescale: {rescale:.2f}"
-                    if avg_iterations and method != "initial"
+                    + f" average iterations last batch: {avg_iterations}"
+                    if avg_iterations
                     else ""
                 ),
             )
@@ -460,12 +411,17 @@ def advanced_statistical_analysis(
             }
 
             def finished_futures():
-                # Poll so that Stop is noticed even while long refits are running
+                # Poll so that Stop is noticed even while long refits are running,
+                # and show progress: a refit can take minutes before it finishes
                 pending = set(futures)
+                last_progress = 0.0
                 while pending:
                     done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
                     if _stop_requested(render_callback):
                         return
+                    if render_callback and time.time() - last_progress > 1.0:
+                        last_progress = time.time()
+                        show_progress(len(pending) + len(done))
                     yield from done
 
             for future in finished_futures():
@@ -572,6 +528,7 @@ class QuickFitInterface:
     wRMSE_threshold: float
     width_regularization: bool
     it_index: int
+    convergence_window: int = CONVERGENCE_WINDOW
 
 
 def execute_quick_fit(task: QuickFitInterface):
@@ -586,6 +543,7 @@ def execute_quick_fit(task: QuickFitInterface):
         task.wRMSE_threshold,
         task.width_regularization,
         task.it_index,
+        task.convergence_window,
     )
 
 
@@ -600,6 +558,7 @@ def quick_fit_model(
     wRMSE_threshold: float = 1e-4,
     width_regularization: bool = True,
     it_index: int = 0,
+    convergence_window: int = CONVERGENCE_WINDOW,
 ) -> tuple[Dict[int, peak_params], bool, int]:
     iteration = 0
     try:
@@ -617,11 +576,18 @@ def quick_fit_model(
 
         widths = (-1, -1, -1, -1)
         quality_metrics: Optional[FitQualityMetricsReduced] = None
-        # Run a quick refinement (fewer iterations for speed)
+        # theta_threshold: largest allowed move per window, in Laplace error bars
+        monitor = ConvergenceMonitor(
+            spectrum,
+            list(working_peaks.keys()),
+            data_x,
+            data_y,
+            threshold=theta_threshold,
+            window=convergence_window,
+        )
         for iteration in range(n_iterations):
             if _worker_stop_event is not None and _worker_stop_event.is_set():
                 return {}, False, iteration
-            old_theta, peak_list = spectrum.get_packed_parameters()
             random_list = np.random.permutation(list(working_peaks.keys()))
             if width_regularization and quality_metrics:
                 widths = (
@@ -657,12 +623,8 @@ def quick_fit_model(
                     rmse_converged = quality_metrics.weighted_rmse < wRMSE_threshold
 
                 if check_convergence == "theta-gradient" or check_convergence == "both":
-                    new_theta, peak_list = spectrum.get_packed_parameters()
-                    theta_converged, delta_theta = check_theta_convergence(
-                        old_theta,
-                        new_theta,
-                        tol_theta=theta_threshold,
-                    )
+                    monitor.update(iteration + 1)
+                    theta_converged = monitor.converged
 
                 if check_convergence == "both":
                     converged = bool(rmse_converged and theta_converged)
@@ -802,6 +764,8 @@ def _make_bootstrap_task(
             wRMSE_threshold=wRMSE_threshold,
             width_regularization=True,
             it_index=b,
+            # Starts from the fitted solution: settles quickly, short window
+            convergence_window=BOOTSTRAP_CONVERGENCE_WINDOW,
         )
 
         return task
@@ -866,6 +830,115 @@ def _peak_profile(x, peak_model, integral, x0, sigma_L, sigma_R):
     return bi_gaussian(x, A, x0, sigma_L, sigma_R)
 
 
+def _laplace_jacobian(spectrum: MSData, peaks: list[int], x: np.ndarray, step=1e-4):
+    """
+    Jacobian of the model w.r.t. log(integral), x0 / width, log(sigma_L),
+    log(sigma_R) of every peak (one block of 4 columns per peak: each peak only
+    affects its own term). Also returns the integrals and widths.
+    """
+    J = np.zeros((len(x), 4 * len(peaks)))
+    widths = np.zeros(len(peaks))
+    integral_values = np.zeros(len(peaks))
+    for i, peak in enumerate(peaks):
+        p = spectrum.peaks[peak]
+        if spectrum.peak_model == "lorentzian":
+            integral = bi_Lorentzian_integral(p.A_refined, p.sigma_L, p.sigma_R)
+        else:
+            integral = bi_gaussian_integral(p.A_refined, p.sigma_L, p.sigma_R)
+        theta = [integral, p.x0_refined, p.sigma_L, p.sigma_R]
+        integral_values[i] = integral
+        width = (p.sigma_L + p.sigma_R) / 2
+        widths[i] = width
+
+        def profile(t):
+            return _peak_profile(x, spectrum.peak_model, *t)
+
+        J[:, 4 * i] = profile(theta)  # d/dlog(I) = f
+        for j in (1, 2, 3):
+            plus, minus = list(theta), list(theta)
+            if j == 1:  # x0, in units of the peak width
+                plus[1] += step * width
+                minus[1] -= step * width
+            else:  # log sigma
+                plus[j] *= np.exp(step)
+                minus[j] *= np.exp(-step)
+            J[:, 4 * i + j] = (profile(plus) - profile(minus)) / (2 * step)
+    return J, integral_values, widths
+
+
+
+
+def parameter_state(spectrum: MSData, peaks: list[int]) -> np.ndarray:
+    """Per peak: log(integral), x0, log(sigma_L), log(sigma_R)."""
+    integral = bi_Lorentzian_integral if spectrum.peak_model == "lorentzian" else bi_gaussian_integral
+    return np.array(
+        [
+            [
+                np.log(max(integral(q.A_refined, q.sigma_L, q.sigma_R), 1e-300)),
+                q.x0_refined,
+                np.log(max(q.sigma_L, 1e-300)),
+                np.log(max(q.sigma_R, 1e-300)),
+            ]
+            for q in (spectrum.peaks[p] for p in peaks)
+        ]
+    )
+
+
+def parameter_sd(spectrum: MSData, peaks: list[int], x, y, rcond=1e-10) -> np.ndarray:
+    """
+    Laplace standard errors (MAD noise, as laplace_covariance_analysis) of the
+    quantities of parameter_state, per peak; the apex error is in m/z.
+    """
+    J, _, widths = _laplace_jacobian(spectrum, peaks, x)
+    residual = y - spectrum.calculate_mbg(x, fitting=True)
+    sigma = 1.4826 * np.median(np.abs(residual - np.median(residual)))
+    U, svals, VT = np.linalg.svd(J, full_matrices=False)
+    keep = svals > svals[0] * rcond
+    variance = sigma**2 * np.sum((VT[keep] / svals[keep, None]) ** 2, axis=0)
+    sd = np.sqrt(variance).reshape(-1, 4)
+    sd[:, 1] *= widths
+    return sd
+
+
+class ConvergenceMonitor:
+    """
+    The refiner is converged when the average parameters over the last `window`
+    iterations differ from the average over the window before by less than
+    `threshold` error bars, for every peak's integral, apex and widths.
+
+    - Scale free: changes are in units of each parameter's Laplace error bar.
+    - Averaging over a window removes the iteration-to-iteration jitter of the
+      refiner (random peak order, damped steps), which otherwise sets a floor on
+      the change measured between two single iterations; a slow drift remains
+      fully visible.
+    """
+
+    def __init__(self, spectrum: MSData, peaks, x, y, threshold, window=CONVERGENCE_WINDOW):
+        self.spectrum, self.peaks, self.x, self.y = spectrum, list(peaks), x, y
+        self.threshold, self.window = threshold, window
+        self.states = []  # parameter states of the current window
+        self.previous_mean = None
+        self.last_move = float("nan")  # largest move between window averages, in error bars
+        self.converged = False
+
+    def update(self, iteration: int) -> bool:
+        """Call once per iteration; True when a window was completed and compared."""
+        self.states.append(parameter_state(self.spectrum, self.peaks))
+        if iteration == 0 or iteration % self.window:
+            return False
+        mean = np.mean(self.states, axis=0)
+        self.states = []
+        previous, self.previous_mean = self.previous_mean, mean
+        if previous is None:
+            return False
+        sd = parameter_sd(self.spectrum, self.peaks, self.x, self.y)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            moves = np.where(sd > 0, np.abs(mean - previous) / sd, 0.0)
+        self.last_move = float(np.nanmax(moves)) if moves.size else 0.0
+        self.converged = self.last_move < self.threshold
+        return True
+
+
 def laplace_covariance_analysis(step=1e-4, rcond=1e-10) -> dict[int, dict]:
     """
     Laplace (linearised) parameter covariance of the current fit:
@@ -905,35 +978,7 @@ def laplace_covariance_analysis(step=1e-4, rcond=1e-10) -> dict[int, dict]:
         log("Laplace analysis: not enough data points")
         return {}
 
-    # Jacobian, one block of 4 columns per peak (each peak only affects its own term)
-    J = np.zeros((n_points, n_params))
-    widths = []
-    integral_values = []
-    for i, peak in enumerate(peak_list):
-        p = spectrum.peaks[peak]
-        if spectrum.peak_model == "lorentzian":
-            integral = bi_Lorentzian_integral(p.A_refined, p.sigma_L, p.sigma_R)
-        else:
-            integral = bi_gaussian_integral(p.A_refined, p.sigma_L, p.sigma_R)
-        theta = [integral, p.x0_refined, p.sigma_L, p.sigma_R]
-        integral_values.append(integral)
-        width = (p.sigma_L + p.sigma_R) / 2
-        widths.append(width)
-
-        def profile(t):
-            return _peak_profile(x, spectrum.peak_model, *t)
-
-        J[:, 4 * i] = profile(theta)  # d/dlog(I) = f
-        for j in (1, 2, 3):
-            plus, minus = list(theta), list(theta)
-            if j == 1:  # x0, in units of the peak width
-                plus[1] += step * width
-                minus[1] -= step * width
-            else:  # log sigma
-                plus[j] *= np.exp(step)
-                minus[j] *= np.exp(-step)
-            J[:, 4 * i + j] = (profile(plus) - profile(minus)) / (2 * step)
-
+    J, integral_values, widths = _laplace_jacobian(spectrum, peak_list, x, step)
     sigma = 1.4826 * np.median(np.abs(residual - np.median(residual)))
 
     U, svals, VT = np.linalg.svd(J, full_matrices=False)

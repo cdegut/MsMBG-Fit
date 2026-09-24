@@ -18,7 +18,7 @@ from modules.math import (
     bi_Lorentzian,
     bi_Lorentzian_integral,
 )
-from modules.fitting.fitting_quality import laplace_covariance_analysis
+from modules.fitting.fitting_quality import CONVERGENCE_WINDOW, laplace_covariance_analysis
 from modules.rendercallback import get_global_render_callback_ref
 import seaborn as sns
 
@@ -72,9 +72,9 @@ def show_stop_button():
 
 STOP_REASON_SHORT = {
     "max_iter": "iteration limit (not converged)",
-    "theta": "parameter change",
+    "theta": "parameters stable",
     "r2": "R²",
-    "theta+r2": "parameter change + R²",
+    "theta+r2": "parameters stable + R²",
     "user": "user",
 }
 
@@ -83,7 +83,7 @@ def update_stop_criteria_label():
     """Label of the collapsible 'Stop at' panel: settings and last stop reason."""
     label = (
         f"Stop at: {dpg.get_value('fitting_iterations')} it. | "
-        f"change < {dpg.get_value('theta_threshold_selector'):g}e-5 | "
+        f"moves < {dpg.get_value('theta_threshold_selector'):g} SE / {CONVERGENCE_WINDOW} it. | "
         f"R² > {dpg.get_value('fitting_r2'):g}"
     )
     summary: FitSummary | None = get_global_render_callback_ref().fit_summary
@@ -118,7 +118,9 @@ def show_stop_reason(fit_summary: FitSummary | None):
     )
     dpg.set_value(
         "stop_theta_status",
-        f"last change: {fit_summary.delta_theta / 1e-5:.3g} (*e-5)",
+        f"largest move: {fit_summary.delta_theta:.2f} error bars"
+        if np.isfinite(fit_summary.delta_theta)
+        else "largest move: not measured yet",
     )
     dpg.set_value("stop_r2_status", f"last R²: {fit_summary.r_squared:.4f}")
 
@@ -216,7 +218,7 @@ def run_fitting_callback(sender, app_data, user_data: RenderCallback):
     render_callback = user_data
     dpg.show_item("Fitting_indicator")
     k = dpg.get_value("fitting_iterations")
-    theta_threshold = dpg.get_value("theta_threshold_selector") * 1e-5
+    theta_threshold = dpg.get_value("theta_threshold_selector")  # in error bars
     dpg.hide_item("start_fitting_button")
     dpg.hide_item("fit_options_button")
     show_stop_button()

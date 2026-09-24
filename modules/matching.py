@@ -565,11 +565,14 @@ def check_integral_ratio():
             selected_sets.append(k)
     spectrum = get_global_msdata_ref()
 
+    def matches(peak):  # older files store plain numbers here: skip them
+        return [m for m in spectrum.peaks[peak].matched_with if isinstance(m, MatchedWith)]
+
     ions_lists = [[]]
     for peak_set in selected_sets:
         ions_list = []
         for peak in spectrum.peaks:
-            for match in spectrum.peaks[peak].matched_with:
+            for match in matches(peak):
                 if match.set == peak_set:
                     ions_list.append(match.charge)
         ions_lists.append(ions_list)
@@ -579,19 +582,19 @@ def check_integral_ratio():
         useful_ions &= set(ions)
 
     ions = sorted(useful_ions)
+    if not ions:
+        for peak_set in selected_sets:
+            dpg.set_value(f"Integral_ratio_{peak_set}", "No charge state in common")
+        return
+
     # Peaks of each set at each charge state (ion)
     set_ion_peaks: dict[tuple[int, int], list[int]] = {
         (k, ion): [] for k in selected_sets for ion in ions
     }
     for peak in spectrum.peaks:
-        for match in spectrum.peaks[peak].matched_with:
+        for match in matches(peak):
             if match.set in selected_sets and match.charge in useful_ions:
                 set_ion_peaks[(match.set, match.charge)].append(peak)
-
-    if not ions:
-        for peak_set in selected_sets:
-            dpg.set_value(f"Integral_ratio_{peak_set}", "No charge state in common")
-        return
 
     shares, errors = closed_geometric_mean_shares(spectrum, selected_sets, ions, set_ion_peaks)
     for k, peak_set in enumerate(selected_sets):

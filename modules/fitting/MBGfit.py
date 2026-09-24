@@ -12,9 +12,11 @@ from modules.fitting.fitting_quality import (
     FitQualityMetricsReduced,
     advanced_statistical_analysis,
     calculate_fit_quality_metrics,
+    CONVERGENCE_WINDOW,
+    ConvergenceMonitor,
     laplace_covariance_analysis,
 )
-from modules.math import check_theta_convergence, combine_errors
+from modules.math import combine_errors
 from modules.fitting.peak_starting_points import update_peak_starting_points
 import numpy as np
 from modules.fitting.refiner import refine_iteration
@@ -190,9 +192,15 @@ def refine_peak_parameters(
     ##############################
     k = 0
     sigma_L_mean, sigma_R_mean, sigma_L_std, sigma_R_std = -1, -1, -1, -1
-    theta_new = None
-    theta_old, peak_list = spectrum.get_packed_parameters()
-    delta_theta = 0
+    # theta_threshold: largest allowed move per window, in Laplace error bars
+    monitor = ConvergenceMonitor(
+        spectrum,
+        working_peak_list,
+        spectrum.baseline_corrected[:, 0],
+        spectrum.baseline_corrected[:, 1],
+        threshold=theta_threshold,
+    )
+    delta_theta = float("nan")
     theta_converged = False
     metric_history = []
     oscillation_detected = False
@@ -242,16 +250,20 @@ def refine_peak_parameters(
                 oscillation_detected = True
                 print("Oscillation detected in fitting metrics")
 
-        # check for parameter convergence
-        if theta_new is not None:
-            theta_converged, delta_theta = check_theta_convergence(
-                theta_old, theta_new, tol_theta=theta_threshold
-            )
-            theta_old = theta_new
+        # check for parameter convergence (every CONVERGENCE_WINDOW iterations)
+        if monitor.update(k):
+            delta_theta = monitor.last_move
+            theta_converged = monitor.converged
 
         dpg.set_value(
             "Fitting_indicator_text",
-            f"Iter {k}: wRMSE: {current_metric:.4f}, R²: {r_squared:.4f}, Parameters change: {delta_theta:.4e}, iteration time: {time.time() - iteration_start:.2f}s",
+            f"Iter {k}: wRMSE: {current_metric:.4f}, R²: {r_squared:.4f}, largest move: "
+            + (
+                f"{delta_theta:.2f} error bars / {CONVERGENCE_WINDOW} it."
+                if np.isfinite(delta_theta)
+                else "measuring..."
+            )
+            + f", iteration time: {time.time() - iteration_start:.2f}s",
         )
         alpha_convergence = 0.95
         # Check convergence using multiple criteria
@@ -295,7 +307,6 @@ def refine_peak_parameters(
                 widths=widths,
                 alpha=alpha_convergence,
             )
-        theta_new, peak_list = spectrum.get_packed_parameters()
 
     ##############################
     # End of iteration loop
@@ -346,14 +357,11 @@ def refine_peak_parameters(
         f"X²r={chi_squared:.3f}, Median peak error={median_error:.4f}, Time: {time_taken:.2f}s",
     )
     render_callback.iterations_done = k
-    render_callback.finishing_delta_theta = (
-        float(delta_theta) if delta_theta != 0 else 5e-5
-    )
 
     for peak in working_peak_list:
         spectrum.peaks[peak].fitted = True
         spectrum.peaks[peak].fit_quality = full_quality_metrics.peak_quality.get(
-            peak, {}
+            peak, FitQualityPeakMetrics(0.0, 0.0, 1.0, 0.0)
         )
 
     return True
@@ -362,11 +370,18 @@ def refine_peak_parameters(
 def stop_reason_text(fit_summary: FitSummary) -> str:
     return {
         "max_iter": "Not converged: iteration limit reached",
-        "theta": "Converged: parameter change below threshold",
+        "theta": "Converged: parameters stable",
         "r2": "Converged: R² above threshold",
-        "theta+r2": "Converged: parameter change and R² thresholds",
+        "theta+r2": "Converged: parameters stable and R² above threshold",
         "user": "Stopped by user",
     }.get(fit_summary.stop_reason, fit_summary.stop_reason)
+
+
+# Error analysis: number of refits, and iteration cap of a bootstrap refit (it
+# starts from the fitted solution); a restart refit is capped like the main fit
+BOOTSTRAP_SAMPLES = 128
+BOOTSTRAP_MAX_ITERATIONS = 500
+RESTART_SAMPLES = 16  # one round of refits on a 16-core machine
 
 
 def run_advanced_statistical_analysis():
@@ -385,15 +400,10 @@ def run_advanced_statistical_analysis():
     if not working_peak_list:
         log("No fitted peaks: run the fitting first")
         return
-    if render_callback.iterations_done == 0:
-        render_callback.iterations_done = dpg.get_value("fitting_iterations")
-    if render_callback.finishing_delta_theta == 0:
-        render_callback.finishing_delta_theta = (
-            dpg.get_value("theta_threshold_selector") * 1e-5
-        )
     data_x = spectrum.baseline_corrected[:, 0]
     data_y = spectrum.baseline_corrected[:, 1]
-    k = render_callback.iterations_done
+    # Refits stop with the same convergence test as the main fit
+    convergence_threshold = dpg.get_value("theta_threshold_selector")
 
     # Laplace errors of the current fit, combined with the bootstrap below
     laplace_covariance_analysis()
@@ -409,11 +419,11 @@ def run_advanced_statistical_analysis():
         data_y=data_y,
         render_callback=render_callback,
         method="bootstrap-parametric",
-        macro_iteration=512,
-        micro_iteration=30,
+        macro_iteration=BOOTSTRAP_SAMPLES,
+        micro_iteration=BOOTSTRAP_MAX_ITERATIONS,
         check_convergence="theta-gradient",
         wRMSE_threshold=quality_metrics.weighted_rmse * 1.05,
-        theta_threshold=render_callback.finishing_delta_theta * 2,
+        theta_threshold=convergence_threshold,
     )
 
     if error_bootstrap is False:
@@ -425,11 +435,11 @@ def run_advanced_statistical_analysis():
         data_x,
         data_y,
         render_callback,
-        macro_iteration=64,
-        micro_iteration=int(k * 1.5),
+        macro_iteration=RESTART_SAMPLES,
+        micro_iteration=dpg.get_value("fitting_iterations"),
         check_convergence="theta-gradient",
         wRMSE_threshold=quality_metrics.weighted_rmse * 1.1,
-        theta_threshold=render_callback.finishing_delta_theta * 2,
+        theta_threshold=convergence_threshold,
         method="initial",
     )
     if errors_random_start is False and dpg.get_value("stop_fitting_button"):

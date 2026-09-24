@@ -46,6 +46,14 @@ def fitting_window(render_callback):
                 default_value=False,
             )
             dpg.add_button(label="Redraw Peaks", callback=draw_fitted_peaks_callback)
+            # Progress and result of the last fit / analysis: right under the plot,
+            # so it stays visible while fitting
+            dpg.add_loading_indicator(
+                style=5, radius=3, show=False, tag="Fitting_indicator"
+            )
+            with dpg.group(horizontal=False):
+                dpg.add_text("", tag="Fitting_indicator_text")
+                dpg.add_text("", tag="Fitting_indicator_sub_text")
         dpg.add_spacer(height=4)
 
         # Row 1: start / stop, and the three stopping criteria
@@ -128,9 +136,9 @@ def fitting_window(render_callback):
                             dpg.add_text("Max iterations:", tag="stop_iter_label")
                             dpg.add_input_int(
                                 label="",
-                                default_value=1000,
+                                default_value=3000,
                                 min_value=50,
-                                max_value=10000,
+                                max_value=20000,
                                 width=150,
                                 tag="fitting_iterations",
                                 callback=update_stop_criteria_label,
@@ -138,13 +146,23 @@ def fitting_window(render_callback):
                             dpg.add_text("", tag="stop_iter_status")
                         with dpg.group(horizontal=False):
                             dpg.add_text(
-                                "OR parameter change below (*e-5):", tag="stop_theta_label"
+                                "OR moves below (error bars / 50 it.):", tag="stop_theta_label"
                             )
+                            with dpg.tooltip("stop_theta_label"):
+                                dpg.add_text(
+                                    "Converged when the parameters averaged over the last 50 "
+                                    "iterations differ from the average over the 50 before by "
+                                    "less than this fraction of their Laplace error bar, for every "
+                                    "peak's integral, apex and widths.",
+                                    wrap=380,
+                                )
                             dpg.add_input_float(
                                 label="",
-                                default_value=1,
-                                step=1,
+                                default_value=0.3,
+                                step=0.05,
                                 min_value=0.01,
+                                min_clamped=True,
+                                format="%.2f",
                                 width=150,
                                 tag="theta_threshold_selector",
                                 callback=update_stop_criteria_label,
@@ -176,10 +194,11 @@ def fitting_window(render_callback):
             dpg.bind_item_theme(dpg.last_item(), "primary_button_theme")
             with dpg.tooltip("advanced_statistical_analysis_button"):
                 dpg.add_text(
-                    "Parametric bootstrap (512 resamples) and random restarts (64 refits). "
+                    "Parametric bootstrap (128 resamples, about 1-2 minutes) and random "
+                    "restarts (16 refits from randomised starts, several minutes). Every "
+                    "refit stops with the same convergence test as the fit. "
                     "Gives the final ± on integrals and positions: "
-                    "the largest of bootstrap, Laplace and restarts. "
-                    "Takes several minutes.",
+                    "the largest of bootstrap, Laplace and restarts.",
                     wrap=400,
                 )
             dpg.add_text("", tag="error_analysis_status", wrap=800)
@@ -189,14 +208,6 @@ def fitting_window(render_callback):
             #     tag="laplace_covariance_analysis_button",
             # )
 
-        # Row 3: progress and result of the last fit / analysis
-        with dpg.group(horizontal=True):
-            dpg.add_loading_indicator(
-                style=5, radius=3, show=False, tag="Fitting_indicator"
-            )
-            with dpg.group(horizontal=False):
-                dpg.add_text("", tag="Fitting_indicator_text")
-                dpg.add_text("", tag="Fitting_indicator_sub_text")
         # dpg.add_button(
         #     label="Draw Initial Peaks",
         #     callback=draw_initial_peaks_callback,

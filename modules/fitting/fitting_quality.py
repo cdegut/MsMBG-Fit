@@ -312,6 +312,14 @@ def advanced_statistical_analysis(
     started = time.time()
     label = "Refit with randomisation" if method == "initial" else "Bootstrap"
 
+    # Refits run cpu_count at a time: the analysis takes `rounds_total` rounds of
+    # about one refit duration each (measured on the first round of each batch)
+    rounds_total = sum(
+        -(-min(BATCH_SIZE, macro_iteration - b * BATCH_SIZE) // cpu_count)
+        for b in range((macro_iteration + BATCH_SIZE - 1) // BATCH_SIZE)
+    )
+    first_round_durations: list[float] = []
+
     def show_progress(unfinished_in_batch: int):
         elapsed = time.time() - started
         count = completed_tasks["count"]
@@ -320,8 +328,9 @@ def advanced_statistical_analysis(
             f"{label}: {count}/{macro_iteration} done, {running} running, "
             f"{int(elapsed // 60)} min {int(elapsed % 60):02d} s"
         )
-        if count:
-            remaining = elapsed / count * (macro_iteration - count)
+        if first_round_durations:
+            total = rounds_total * float(np.median(first_round_durations))
+            remaining = max(total - elapsed, 0.0)
             text += f", about {int(remaining // 60)} min {int(remaining % 60):02d} s left"
         dpg.set_value("Fitting_indicator_sub_text", text)
     num_batches = (macro_iteration + BATCH_SIZE - 1) // BATCH_SIZE
@@ -403,6 +412,8 @@ def advanced_statistical_analysis(
             task_pool.append(task)
 
         stop_event = multiprocessing.Event()
+        batch_started = time.time()
+        finished_in_batch = 0
         with ProcessPoolExecutor(
             max_workers=cpu_count, initializer=_init_worker, initargs=(stop_event,)
         ) as executor:
@@ -431,6 +442,9 @@ def advanced_statistical_analysis(
                 # Update progress (thread-safe)
                 with completed_lock:
                     completed_tasks["count"] += 1
+                    finished_in_batch += 1
+                    if finished_in_batch <= min(cpu_count, len(task_pool)):
+                        first_round_durations.append(time.time() - batch_started)
                     if converged:
                         completed_tasks["successful"] += 1
                     batch_iterations.append((iteration))

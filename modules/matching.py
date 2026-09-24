@@ -578,90 +578,76 @@ def check_integral_ratio():
     for ions in ions_lists[2:]:
         useful_ions &= set(ions)
 
-    ratios: dict[int, list] = {}
-    for peak_set in selected_sets:
-        ratios[peak_set] = []
+    ions = sorted(useful_ions)
+    # Peaks of each set at each charge state (ion)
+    set_ion_peaks: dict[tuple[int, int], list[int]] = {
+        (k, ion): [] for k in selected_sets for ion in ions
+    }
+    for peak in spectrum.peaks:
+        for match in spectrum.peaks[peak].matched_with:
+            if match.set in selected_sets and match.charge in useful_ions:
+                set_ion_peaks[(match.set, match.charge)].append(peak)
 
-    se_ratios: dict[int, list] = {}
-    for peak_set in selected_sets:
-        se_ratios[peak_set] = []
+    if not ions:
+        for peak_set in selected_sets:
+            dpg.set_value(f"Integral_ratio_{peak_set}", "No charge state in common")
+        return
 
-    integral_data: dict[int, dict] = {}
-    for ion in useful_ions:
-        integral_data[ion] = {
-            "total_integral": 0,
-            "total_integral_error": 0,
-            "peaks": [],
-        }
-
-        for peak in spectrum.peaks:
-            for match in spectrum.peaks[peak].matched_with:
-                if match.charge == ion and match.set in selected_sets:
-                    integral_data[ion]["total_integral"] += spectrum.peaks[
-                        peak
-                    ].integral
-                    integral_data[ion]["total_integral_error"] += (
-                        spectrum.peaks[peak].se_integral ** 2
-                    )
-                    integral_data[ion]["peaks"].append(peak)
-
-        integral_data[ion]["total_integral_error"] = (
-            integral_data[ion]["total_integral_error"] ** 0.5
-        )
-
-        for peak in integral_data[ion]["peaks"]:
-            peak_integral = spectrum.peaks[peak].integral
-            peak_se = spectrum.peaks[peak].se_integral
-            total_integral = integral_data[ion]["total_integral"]
-            total_se = integral_data[ion]["total_integral_error"]
-
-            # Calculate the ratio
-            ratio = peak_integral / total_integral
-
-            # Propagate the error for the ratio
-            se_error = (
-                ratio
-                * ((peak_se / peak_integral) ** 2 + (total_se / total_integral) ** 2)
-                ** 0.5
-            )
-
-            for match in spectrum.peaks[peak].matched_with:
-                if match.set in selected_sets:
-                    ratios[match.set].append(ratio)
-                    se_ratios[match.set].append(se_error)
-
-    for peak_set in selected_sets:
-        geo_mean, error = calculate_geometric_mean_se(
-            ratios[peak_set], se_ratios[peak_set]
-        )
+    shares, errors = closed_geometric_mean_shares(spectrum, selected_sets, ions, set_ion_peaks)
+    for k, peak_set in enumerate(selected_sets):
         dpg.set_value(
             f"Integral_ratio_{peak_set}",
-            f"{geo_mean:.2f} ± {error:.3f} using {len(ratios[peak_set])} ions",
+            f"{shares[k]:.2f} ± {errors[k]:.3f} using {len(ions)} ions",
         )
 
 
-def calculate_geometric_mean_se(ratios, se_ratios):
-    # Ensure ratios and se_ratios are numpy arrays
-    ratios = np.array(ratios)
-    se_ratios = np.array(se_ratios)
+def closed_geometric_mean_shares(
+    spectrum: MSData,
+    sets: list[int],
+    ions: list[int],
+    set_ion_peaks: dict[tuple[int, int], list[int]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Relative abundance of each set: share of the charge-state total, averaged over
+    charge states as a geometric mean, then closed (divided by the sum) so the
+    shares add up to 1 (centre of compositional data).
 
-    log_ratios = np.log(ratios)
-    geo_mean = np.exp(np.mean(log_ratios))
+    Standard errors combine
+    - the measurement error, propagated from the peak integrals with their full
+      covariance (Laplace correlations, see MSData.integral_covariance): overlapping
+      species are anticorrelated, and each species is part of the total;
+    - the scatter between charge states (sample covariance of the log shares).
+    Both are propagated through the closure.
+    """
+    n, K = len(ions), len(sets)
+    peaks = sorted({p for ps in set_ion_peaks.values() for p in ps})
+    col = {p: i for i, p in enumerate(peaks)}
+    integral = np.array([spectrum.peaks[p].integral for p in peaks])
 
-    # Measurement uncertainty contribution
-    relative_ses = se_ratios / ratios
-    measurement_var = np.mean(relative_ses**2)
+    # Log shares L[z, k] and gradient of their mean m_k w.r.t. the peak integrals
+    L = np.zeros((n, K))
+    G = np.zeros((K, len(peaks)))
+    for z, ion in enumerate(ions):
+        set_totals = [sum(integral[col[p]] for p in set_ion_peaks[(k, ion)]) for k in sets]
+        total = sum(set_totals)
+        for k, peak_set in enumerate(sets):
+            L[z, k] = np.log(set_totals[k] / total)
+            for p in set_ion_peaks[(peak_set, ion)]:
+                G[k, col[p]] += 1 / (n * set_totals[k])
+            for other in sets:
+                for p in set_ion_peaks[(other, ion)]:
+                    G[k, col[p]] -= 1 / (n * total)
 
-    # Sample variance contribution
-    sample_var = np.var(log_ratios, ddof=1) / len(ratios)
+    geo = np.exp(L.mean(axis=0))
+    shares = geo / geo.sum()
+    # Closure s = geo / sum(geo): ds = diag(s) (I - 1 s^T) dm
+    J = np.diag(shares) @ (np.eye(K) - np.outer(np.ones(K), shares))
 
-    # Total variance
-    total_var = measurement_var + sample_var
-
-    # Standard error of the geometric mean
-    geo_mean_se = geo_mean * np.sqrt(total_var)
-
-    return geo_mean, geo_mean_se
+    cov_m = G @ spectrum.integral_covariance(peaks) @ G.T
+    if n > 1:
+        cov_m = cov_m + np.atleast_2d(np.cov(L, rowvar=False, ddof=1)) / n
+    cov_s = J @ cov_m @ J.T
+    return shares, np.sqrt(np.clip(np.diag(cov_s), 0, None))
 
 
 def print_to_terminal():

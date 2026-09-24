@@ -72,6 +72,63 @@ def create_styles():
                 dpg.mvThemeCol_TableRowBg, (100, 100, 100), category=dpg.mvThemeCat_Core
             )
 
+    # Status text colours (readable on the light background)
+    for name, color in (
+        ("text_good_theme", (20, 130, 60)),
+        ("text_warn_theme", (200, 110, 0)),
+        ("text_bad_theme", (200, 30, 30)),
+        ("text_muted_theme", (130, 130, 130)),
+    ):
+        with dpg.theme(tag=name):
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_color(
+                    dpg.mvThemeCol_Text, color, category=dpg.mvThemeCat_Core
+                )
+
+    # Prominent filled button (final error analysis)
+    with dpg.theme(tag="primary_button_theme"):
+        with dpg.theme_component(dpg.mvButton):
+            dpg.add_theme_color(
+                dpg.mvThemeCol_Button, (30, 110, 200), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_color(
+                dpg.mvThemeCol_ButtonHovered, (20, 90, 175), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_color(
+                dpg.mvThemeCol_ButtonActive, (15, 70, 145), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_color(
+                dpg.mvThemeCol_Text, (255, 255, 255), category=dpg.mvThemeCat_Core
+            )
+
+    # Red "Stop fitting" button (a selectable inside a red frame, see dpg_fitting)
+    with dpg.theme(tag="stop_button_theme"):
+        with dpg.theme_component(dpg.mvAll):
+            dpg.add_theme_color(
+                dpg.mvThemeCol_ChildBg, (205, 55, 55), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_color(
+                dpg.mvThemeCol_HeaderHovered, (175, 35, 35), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_color(
+                dpg.mvThemeCol_HeaderActive, (130, 20, 20), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_color(
+                dpg.mvThemeCol_Header, (130, 20, 20), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_color(
+                dpg.mvThemeCol_Text, (255, 255, 255), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_style(
+                dpg.mvStyleVar_ChildRounding, 5, category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_style(
+                dpg.mvStyleVar_WindowPadding, 0, 0, category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_style(
+                dpg.mvStyleVar_SelectableTextAlign, 0.5, 0.5, category=dpg.mvThemeCat_Core
+            )
+
     with dpg.theme(tag="residual_theme"):
         with dpg.theme_component(dpg.mvAll):
             dpg.add_theme_style(

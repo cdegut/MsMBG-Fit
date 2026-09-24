@@ -22,6 +22,7 @@ class RenderCallback:
         self.working_peak_list: List[int] = []
         self.iterations_done: int = 0
         self.finishing_delta_theta: float = 0.0
+        self.fit_summary = None  # FitSummary of the last MBG fit
 
     def execute(self):
         now = time.time()

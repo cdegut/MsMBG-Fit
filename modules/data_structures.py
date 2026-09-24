@@ -33,6 +33,9 @@ class MSData:
         self.smoothing_window = 10
         self.block_width = 25
         self.matching_series = 3
+        # Correlation matrix of peak integrals from the Laplace analysis
+        # {"peaks": [peak ids], "matrix": ndarray}, None when not computed
+        self.laplace_integral_corr: Optional[dict] = None
 
     def import_csv(self, path: str):
         return True
@@ -209,6 +212,23 @@ class MSData:
             mbg = multi_bi_gaussian(data_x, *mbg_params)
         return mbg
 
+    def integral_covariance(self, peaks: List[int]) -> np.ndarray:
+        """
+        Covariance matrix of the integrals of `peaks`: Laplace correlation scaled by
+        each peak's final standard error (se_integral). Peaks without a correlation
+        are treated as uncorrelated.
+        """
+        se = np.array([max(self.peaks[p].se_integral, 0.0) for p in peaks])
+        corr = np.eye(len(peaks))
+        stored = self.laplace_integral_corr
+        if stored is not None:
+            index = {peak: i for i, peak in enumerate(stored["peaks"])}
+            for a, pa in enumerate(peaks):
+                for b, pb in enumerate(peaks):
+                    if a != b and pa in index and pb in index:
+                        corr[a, b] = stored["matrix"][index[pa], index[pb]]
+        return corr * np.outer(se, se)
+
     def save_to_file(self, path: str):
         """Save the entire MSData object to a file using pickle."""
         with open(path, "wb") as f:
@@ -224,9 +244,11 @@ class MSData:
             else list(self.peaks.keys())
         )
 
+        packed_peaks: List[int] = []
         for peak in ordered_peaks_list:
             if self.peaks[peak].do_not_fit:
                 continue
+            packed_peaks.append(peak)
 
             if integral:
                 packed_params.append(self.peaks[peak].integral)
@@ -235,7 +257,7 @@ class MSData:
             packed_params.append(self.peaks[peak].x0_refined)
             packed_params.append(self.peaks[peak].sigma_L)
             packed_params.append(self.peaks[peak].sigma_R)
-        return packed_params, ordered_peaks_list
+        return packed_params, packed_peaks
 
     # @staticmethod
     # def load_from_file(path: str) -> "MSData":
@@ -247,29 +269,12 @@ class MSData:
     def load_from_file(self, path: str):
         with open(path, "rb") as f:
             new_data: MSData = pickle.load(f)
-        self.original_data = new_data.original_data
-        self.working_data = new_data.working_data
-        self.baseline = new_data.baseline
-        self.baseline_corrected = new_data.baseline_corrected
-        self.peaks = new_data.peaks
-        self.baseline_toggle = new_data.baseline_toggle
-        self.baseline_need_update = new_data.baseline_need_update
-        self.matching_data = new_data.matching_data
-        self.smoothing_window = new_data.smoothing_window
-        self.peak_detection_parameters = new_data.peak_detection_parameters
-        self.baseline_window = new_data.baseline_window
-        try:
-            self.block_width = new_data.block_width
-        except AttributeError:
-            self.block_width = 25
-        try:
-            self.matching_series = new_data.matching_series
-        except AttributeError:
-            self.matching_series = 3
-        try:
-            self.peak_model = new_data.peak_model
-        except AttributeError:
-            self.peak_model = "gaussian"
+        # Files saved by older versions miss newer attributes: fall back to defaults
+        for name, default in MSData().__dict__.items():
+            setattr(self, name, getattr(new_data, name, default))
+        self.peaks = {
+            peak: upgrade_peak_params(params) for peak, params in self.peaks.items()
+        }
 
 
 ms_data_global_ref = MSData()
@@ -285,6 +290,25 @@ class FitQualityPeakMetrics:
     peak_rmse: float
     relative_error: float
     r_squared: float
+
+
+@dataclass
+class FitSummary:
+    # Which stopping criterion ended the fit: "max_iter", "theta", "r2", "theta+r2" or "user"
+    stop_reason: str
+    iterations_done: int
+    max_iterations: int
+    delta_theta: float
+    theta_threshold: float
+    r_squared: float
+    r_squared_threshold: float
+    weighted_rmse: float
+    chi_squared_reduced: float
+    signal_to_noise: float
+    aic: float
+    bic: float
+    residual_autocorr: float
+    time_taken: float
 
 
 @dataclass
@@ -327,6 +351,39 @@ class peak_params:
     fit_quality: FitQualityPeakMetrics = field(
         default_factory=lambda: FitQualityPeakMetrics(0.0, 0.0, 1.0, 0.0)
     )
+    # Components of se_integral / se_x0 from the error analysis, -1 when not computed.
+    # se_integral = max(bootstrap, Laplace, restarts)
+    se_integral_bootstrap: float = -1.0
+    se_integral_restart: float = -1.0
+    se_x0_bootstrap: float = -1.0
+    se_x0_restart: float = -1.0
+    # Laplace covariance analysis, -1 when not computed
+    laplace_se_integral: float = -1.0  # relative standard error of the integral
+    laplace_se_x0: float = -1.0
+    # Integral correlation with the left / right m/z neighbours (-1 peak: none)
+    laplace_corr_left: float = 0.0
+    laplace_corr_right: float = 0.0
+    laplace_left_peak: int = -1
+    laplace_right_peak: int = -1
+    laplace_area_corr: float = 0.0  # the stronger anticorrelation of the two
+    laplace_area_peak: int = -1  # ... and that neighbour
+    laplace_message: str = ""
+
+
+def upgrade_peak_params(old: peak_params) -> peak_params:
+    """Rebuild a peak loaded from an older file so every current field exists."""
+    peak = peak_params()
+    for name in peak.__dataclass_fields__:
+        if name in old.__dict__:
+            setattr(peak, name, old.__dict__[name])
+    quality = getattr(peak.fit_quality, "__dict__", {})
+    peak.fit_quality = FitQualityPeakMetrics(
+        snr=quality.get("snr", 0.0),
+        peak_rmse=quality.get("peak_rmse", 0.0),
+        relative_error=quality.get("relative_error", 1.0),
+        r_squared=quality.get("r_squared", 0.0),
+    )
+    return peak
 
 
 def fft_filter_data(y_data, cutoff_frequency=0.1, sampling_rate=1.0):

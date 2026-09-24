@@ -144,6 +144,26 @@ def bi_Lorentzian_integral_numerical(A, width_L, width_R, start, end):
     return result
 
 
+def combine_errors(noise: list[float], restart: float) -> float:
+    """
+    Final standard error: the largest of the available estimates (bootstrap,
+    Laplace, random restarts). They are not independent (bootstrap refits include
+    optimiser spread, restarts spread along the same flat directions Laplace
+    measures), so adding them would double count. Values <= 0 are "not computed".
+    """
+    return float(max([0.0] + [v for v in [*noise, restart] if v > 0]))
+
+
+def bootstrap_std(values: list[float]) -> float:
+    """
+    Standard error of a parameter estimated by resampling (bootstrap, random
+    restarts): the standard deviation of the resampled values.
+    """
+    if len(values) < 2:
+        return float("nan")
+    return float(np.std(values, ddof=1))
+
+
 def standard_error(values: list[float]) -> float:
     """
     Calculate the standard error of the mean for a list of values.

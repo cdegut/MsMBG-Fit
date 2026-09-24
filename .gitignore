@@ -9,3 +9,4 @@ main.spec
 *.pkl
 *.xls
 *.xlsx
+.claude/

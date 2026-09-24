@@ -15,8 +15,10 @@ from modules.math import (
     bi_Lorentzian_integral,
     bi_gaussian_integral,
     multi_bi_gaussian,
-    multi_bi_gaussian_using_I,
-    standard_error,
+    bi_gaussian,
+    bi_Lorentzian,
+    bootstrap_std,
+    combine_errors,
     check_theta_convergence,
 )
 from modules.rendercallback import RenderCallback
@@ -25,7 +27,8 @@ import dearpygui.dearpygui as dpg
 from modules.fitting.refiner import refine_iteration
 from copy import deepcopy
 from typing import Optional
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+import multiprocessing
 from threading import Lock
 
 
@@ -231,6 +234,21 @@ class PerturbationFitErrorMetrics:
     base: list[float]
 
 
+# Set in the worker processes: lets running refits stop as soon as the user asks
+_worker_stop_event = None
+
+
+def _init_worker(stop_event):
+    global _worker_stop_event
+    _worker_stop_event = stop_event
+
+
+def _stop_requested(render_callback) -> bool:
+    if render_callback:
+        render_callback.execute()
+    return bool(dpg.get_value("stop_fitting_button"))
+
+
 def advanced_statistical_analysis(
     spectrum: MSData,
     working_peak_list: list[int],
@@ -271,7 +289,6 @@ def advanced_statistical_analysis(
     }
 
     log(f"Starting bootstrap with {macro_iteration} resamples...")
-    successful_fits = 0
 
     task_pool = []
     # Thread-safe counters
@@ -312,6 +329,9 @@ def advanced_statistical_analysis(
 
             mini_batch = []
             for n in range(0, 4):
+                if _stop_requested(render_callback):
+                    log("Error analysis stopped by user.")
+                    return False
                 test_task = _make_bootstrap_task(
                     spectrum=spectrum,
                     working_peak_list=working_peak_list,
@@ -431,12 +451,24 @@ def advanced_statistical_analysis(
 
             task_pool.append(task)
 
-        with ProcessPoolExecutor(max_workers=cpu_count) as executor:
+        stop_event = multiprocessing.Event()
+        with ProcessPoolExecutor(
+            max_workers=cpu_count, initializer=_init_worker, initargs=(stop_event,)
+        ) as executor:
             futures = {
                 executor.submit(execute_quick_fit, task): task for task in task_pool
             }
 
-            for future in as_completed(futures):
+            def finished_futures():
+                # Poll so that Stop is noticed even while long refits are running
+                pending = set(futures)
+                while pending:
+                    done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                    if _stop_requested(render_callback):
+                        return
+                    yield from done
+
+            for future in finished_futures():
                 task = futures[future]
                 fitted_peaks, converged, iteration = future.result()
 
@@ -449,17 +481,6 @@ def advanced_statistical_analysis(
 
                     # Update GUI
                     if render_callback:
-                        render_callback.execute()
-                        if dpg.get_value("stop_fitting_checkbox"):
-                            log("Fitting stopped by user.")
-                            dpg.set_value("Fitting_indicator_text", "Stopping ...")
-                            # Cancel remaining futures
-                            for f in futures:
-                                f.cancel()
-                            executor.shutdown(wait=False, cancel_futures=True)
-
-                            return False
-
                         if method == "initial":
                             dpg.set_value(
                                 "Fitting_indicator_text",
@@ -497,7 +518,15 @@ def advanced_statistical_analysis(
                             / fitted_peaks[peak].regression_fct[0]
                         )
 
-    print("integrals:", perturbation_results[working_peak_list[0]].integral)
+            if _stop_requested(None):
+                log("Error analysis stopped by user.")
+                dpg.set_value("Fitting_indicator_text", "Stopping ...")
+                dpg.set_item_label("stop_fitting_button", "Stopping...")
+                stop_event.set()  # running refits exit at their next iteration
+                for f in futures:
+                    f.cancel()
+                return False
+
     # Compute standard errors from bootstrap distribution
     final_result = {}
     for peak in working_peak_list:
@@ -508,19 +537,25 @@ def advanced_statistical_analysis(
             final_result[peak] = None
             continue
 
+        # The uncertainty of a parameter is the spread of its resampled values
+        # (not the standard error of their mean, which shrinks with more resamples)
         final_result[peak] = {
-            "A": standard_error((perturbation_results[peak].A)),
-            "x0": standard_error((perturbation_results[peak].x0)),
-            "sigma_L": standard_error((perturbation_results[peak].sigma_L)),
-            "sigma_R": standard_error((perturbation_results[peak].sigma_R)),
-            "integral": standard_error((perturbation_results[peak].integral)),
+            "A": bootstrap_std(perturbation_results[peak].A),
+            "x0": bootstrap_std(perturbation_results[peak].x0),
+            "sigma_L": bootstrap_std(perturbation_results[peak].sigma_L),
+            "sigma_R": bootstrap_std(perturbation_results[peak].sigma_R),
+            "integral": bootstrap_std(perturbation_results[peak].integral),
             "n_samples": len(perturbation_results[peak].A),
-            "base": standard_error((perturbation_results[peak].base)),
+            "base": bootstrap_std(perturbation_results[peak].base),
         }
     if dpg.does_alias_exist("noise"):
         dpg.delete_item("noise")
 
-    log(f"Perturbation complete: {successful_fits}/{macro_iteration} successful fits")
+    log(
+        f"{'Random restarts' if method == 'initial' else 'Bootstrap'} complete: "
+        f"{completed_tasks['count'] - completed_tasks['rejected']}/{macro_iteration} fits used "
+        f"({completed_tasks['successful']} converged, {completed_tasks['rejected']} rejected)"
+    )
 
     return final_result
 
@@ -584,6 +619,8 @@ def quick_fit_model(
         quality_metrics: Optional[FitQualityMetricsReduced] = None
         # Run a quick refinement (fewer iterations for speed)
         for iteration in range(n_iterations):
+            if _worker_stop_event is not None and _worker_stop_event.is_set():
+                return {}, False, iteration
             old_theta, peak_list = spectrum.get_packed_parameters()
             random_list = np.random.permutation(list(working_peaks.keys()))
             if width_regularization and quality_metrics:
@@ -820,226 +857,154 @@ def _make_initial_refit_task(
     return task
 
 
-def laplace_covariance_analysis(log_params=True):
+def _peak_profile(x, peak_model, integral, x0, sigma_L, sigma_R):
+    """Single peak parametrised by its integral instead of its amplitude."""
+    if peak_model == "lorentzian":
+        A = integral / bi_Lorentzian_integral(1.0, sigma_L, sigma_R)
+        return bi_Lorentzian(x, A, x0, sigma_L, sigma_R)
+    A = integral / bi_gaussian_integral(1.0, sigma_L, sigma_R)
+    return bi_gaussian(x, A, x0, sigma_L, sigma_R)
+
+
+def laplace_covariance_analysis(step=1e-4, rcond=1e-10) -> dict[int, dict]:
+    """
+    Laplace (linearised) parameter covariance of the current fit:
+    Cov = s² (JᵀJ)⁻¹, with J the Jacobian of the model w.r.t. every peak parameter.
+
+    Parameters are log(integral), x0 / width, log(sigma_L), log(sigma_R), so the
+    covariance of log(integral) is directly the relative error of the integral and
+    the result does not depend on the units of each parameter.
+    s is the robust (MAD) noise estimate of the residual, as in the parametric
+    bootstrap. The errors are therefore the precision limited by noise: systematic
+    misfit of the peak shape (structured residual) is not included.
+    The correlations do not depend on s.
+
+    Per peak, stores the integral relative standard error, the apex standard error
+    and the strongest correlation between its integral and another peak's integral
+    (strongly negative: area can move between the two peaks).
+    """
     spectrum: MSData = get_global_msdata_ref()
-    theta_hat, peak_list = spectrum.get_packed_parameters(integral=True, ordered=True)
-    theta_hat = np.asarray(theta_hat)
-    x = spectrum.working_data[:, 0]
-    y = spectrum.working_data[:, 1]
-    results = rolling_three_peak_quality(
-        model_func=multi_bi_gaussian_using_I,
-        theta_hat=theta_hat,
-        x=x,
-        y=y,
-        n_peaks=len(peak_list),
+    spectrum.laplace_integral_corr = None
+    peak_list = sorted(
+        (
+            peak
+            for peak in spectrum.peaks
+            if spectrum.peaks[peak].fitted and not spectrum.peaks[peak].do_not_fit
+        ),
+        key=lambda peak: spectrum.peaks[peak].x0_refined,
     )
-    for i, result in enumerate(results):
-        print(f"Peak {peak_list[i]} \n", f"Score: {result["score"]}")
+    if not peak_list:
+        log("Laplace analysis: no fitted peaks")
+        return {}
 
+    x = spectrum.baseline_corrected[:, 0]
+    y = spectrum.baseline_corrected[:, 1]
+    residual = y - spectrum.calculate_mbg(x)
+    n_points, n_params = len(x), 4 * len(peak_list)
+    if n_points <= n_params:
+        log("Laplace analysis: not enough data points")
+        return {}
 
-def _peak_quality_score_from_J_local(J_local, rcond=1e-8, max_log_cond=20.0):
-    """
-    Compute 0..100 score for a local Jacobian J_local (N x n_params_local).
-    Returns dict with components and message.
-    """
-    # SVD on J_local
-    if J_local.size == 0:
-        return {
-            "score": 0.0,
-            "rank_frac": 0.0,
-            "kept": 0,
-            "cond": np.inf,
-            "cond_score": 0.0,
-            "max_abs_corr": 1.0,
-            "corr_score": 0.0,
-            "message": "no data",
-            "singular_values": np.array([]),
+    # Jacobian, one block of 4 columns per peak (each peak only affects its own term)
+    J = np.zeros((n_points, n_params))
+    widths = []
+    integral_values = []
+    for i, peak in enumerate(peak_list):
+        p = spectrum.peaks[peak]
+        if spectrum.peak_model == "lorentzian":
+            integral = bi_Lorentzian_integral(p.A_refined, p.sigma_L, p.sigma_R)
+        else:
+            integral = bi_gaussian_integral(p.A_refined, p.sigma_L, p.sigma_R)
+        theta = [integral, p.x0_refined, p.sigma_L, p.sigma_R]
+        integral_values.append(integral)
+        width = (p.sigma_L + p.sigma_R) / 2
+        widths.append(width)
+
+        def profile(t):
+            return _peak_profile(x, spectrum.peak_model, *t)
+
+        J[:, 4 * i] = profile(theta)  # d/dlog(I) = f
+        for j in (1, 2, 3):
+            plus, minus = list(theta), list(theta)
+            if j == 1:  # x0, in units of the peak width
+                plus[1] += step * width
+                minus[1] -= step * width
+            else:  # log sigma
+                plus[j] *= np.exp(step)
+                minus[j] *= np.exp(-step)
+            J[:, 4 * i + j] = (profile(plus) - profile(minus)) / (2 * step)
+
+    sigma = 1.4826 * np.median(np.abs(residual - np.median(residual)))
+
+    U, svals, VT = np.linalg.svd(J, full_matrices=False)
+    keep = svals > svals[0] * rcond
+    cov = sigma**2 * (VT[keep].T / svals[keep] ** 2) @ VT[keep]
+    # Parameters involved in directions the data cannot constrain at all
+    degenerate = np.zeros(n_params, dtype=bool)
+    if not np.all(keep):
+        degenerate = np.any(np.abs(VT[~keep]) > 0.1, axis=0)
+
+    std = np.sqrt(np.clip(np.diag(cov), 0, None))
+    integral_idx = np.arange(len(peak_list)) * 4
+    I_std = std[integral_idx]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        I_corr = cov[np.ix_(integral_idx, integral_idx)] / np.outer(I_std, I_std)
+    I_corr = np.nan_to_num(I_corr)
+    np.fill_diagonal(I_corr, 1.0)
+    spectrum.laplace_integral_corr = {"peaks": list(peak_list), "matrix": I_corr}
+
+    results = {}
+    for i, peak in enumerate(peak_list):
+        se_integral = float(I_std[i])  # relative (log scale)
+        se_x0 = float(std[4 * i + 1] * widths[i])
+        # Integral correlation with the m/z neighbours (peak_list is sorted by apex):
+        # overlap, hence area exchange, happens between adjacent peaks
+        left_peak = peak_list[i - 1] if i > 0 else -1
+        right_peak = peak_list[i + 1] if i < len(peak_list) - 1 else -1
+        corr_left = float(I_corr[i, i - 1]) if left_peak >= 0 else 0.0
+        corr_right = float(I_corr[i, i + 1]) if right_peak >= 0 else 0.0
+        # Strongest anticorrelation of the two, for flags and sorting
+        if left_peak >= 0 and (right_peak < 0 or corr_left <= corr_right):
+            area_corr, area_peak = corr_left, left_peak
+        else:
+            area_corr, area_peak = corr_right, right_peak
+
+        if degenerate[4 * i : 4 * i + 4].any():
+            message = "Not identifiable: the data cannot constrain some of this peak's parameters"
+            se_integral = np.inf
+        else:
+            message = f"Integral ± {se_integral * 100:.1f}%, apex ± {se_x0:.2f} m/z"
+            for side, other, r in (("left", left_peak, corr_left), ("right", right_peak, corr_right)):
+                if other >= 0:
+                    message += f"; r with {side} neighbour Peak {other} = {r:+.2f}"
+                    if r <= -0.8:
+                        message += " (area can move between them)"
+
+        p = spectrum.peaks[peak]
+        p.laplace_se_integral = se_integral
+        p.laplace_se_x0 = se_x0
+        # Best available error: Laplace alone until the bootstrap has run
+        integral = integral_values[i]
+        p.se_integral = combine_errors(
+            [p.se_integral_bootstrap, se_integral * integral], p.se_integral_restart
+        )
+        p.se_x0 = combine_errors([p.se_x0_bootstrap, se_x0], p.se_x0_restart)
+        p.laplace_area_corr = area_corr
+        p.laplace_area_peak = area_peak
+        p.laplace_corr_left = corr_left
+        p.laplace_corr_right = corr_right
+        p.laplace_left_peak = left_peak
+        p.laplace_right_peak = right_peak
+        p.laplace_message = message
+        results[peak] = {
+            "se_integral_rel": se_integral,
+            "se_x0": se_x0,
+            "area_corr": area_corr,
+            "area_peak": area_peak,
         }
 
-    U, svals, VT = np.linalg.svd(J_local, full_matrices=False)
-    svals = np.array(svals)
-    cond = float(svals[0] / (svals[-1] + 1e-30))
-
-    # effective kept singular count by rcond threshold
-    cutoff = svals[0] * rcond
-    kept = int(np.sum(svals > cutoff))
-
-    # rank fraction normalized to 4 (we score per-peak later but pass generic)
-    # if n_params_local>4, we map kept-> fraction of 4 for the peak metric step
-    rank_frac = float(min(kept, 4)) / 4.0
-
-    # conditioning component
-    logc = np.log10(cond + 1e-30)
-    cond_score = 1.0 - np.clip(logc / max_log_cond, 0.0, 1.0)
-
-    # correlation component: largest absolute off-diagonal correlation between columns
-    if J_local.shape[0] > 1 and J_local.shape[1] > 1:
-        C = np.corrcoef(J_local.T)
-        abs_corr = np.abs(C - np.eye(C.shape[0]))
-        max_abs_corr = float(np.max(abs_corr))
-    else:
-        max_abs_corr = 0.0
-    corr_score = 1.0 - np.clip(max_abs_corr, 0.0, 1.0)
-
-    # weights (same as before)
-    w_rank = 0.50
-    w_cond = 0.30
-    w_corr = 0.20
-    combined = w_rank * rank_frac + w_cond * cond_score + w_corr * corr_score
-    score = float(np.clip(combined, 0.0, 1.0) * 100.0)
-
-    # message
-    reasons = []
-    if kept < 4:
-        reasons.append(f"low effective rank ({kept})")
-    if cond_score < 0.5:
-        reasons.append(f"poor conditioning (cond≈{cond:.2e})")
-    if max_abs_corr > 0.8:
-        reasons.append(f"strong parameter correlation (corr≈{max_abs_corr:.2f})")
-    message = " ; ".join(reasons) if reasons else "well constrained"
-
-    return {
-        "score": score,
-        "rank_frac": rank_frac,
-        "kept": kept,
-        "cond": cond,
-        "cond_score": cond_score,
-        "max_abs_corr": max_abs_corr,
-        "corr_score": corr_score,
-        "message": message,
-        "singular_values": svals,
-    }
-
-
-def rolling_three_peak_quality(
-    model_func,
-    theta_hat,
-    x,
-    y,
-    n_peaks,
-    dlog=1e-3,
-    rcond=1e-8,
-    window_factor=1.5,
-):
-    """
-    Compute a per-peak quality score using a 3-peak rolling window.
-    - model_func: f(x, *theta)
-    - theta_hat: full packed parameter vector (len = 4*n_peaks)
-    - x, y: data arrays
-    - n_peaks: number of peaks
-    Returns: list of dicts length n_peaks with entries:
-      {
-        'score': 0..100,
-        'message': str,
-        'stderr_I': float,
-        'I': float,
-        'Cov_local': 4x4 marginal covariance for central peak,
-        'block_svals': array of SVD singular values for block,
-        'block_kept': int,
-        'block_cond': float,
-        'block_indices': list of peak indices in block
-      }
-    """
-    results = []
-    P = len(theta_hat)
-    assert P == 4 * n_peaks, "theta_hat length mismatch"
-
-    # Precompute full model baseline once
-    f0 = model_func(x, *theta_hat)
-    N = len(x)
-
-    for center in range(n_peaks):
-        # define block: center-1, center, center+1 (clipped)
-        block_peaks = [i for i in (center - 1, center, center + 1) if 0 <= i < n_peaks]
-        n_block = len(block_peaks)
-        idxs = []
-        for p in block_peaks:
-            idxs.extend(list(range(p * 4, p * 4 + 4)))  # global param indices for block
-
-        # choose mask covering union of blocks, local window factor aggregated
-        x0s = [theta_hat[p * 4 + 1] for p in block_peaks]
-        sLs = [theta_hat[p * 4 + 2] for p in block_peaks]
-        sRs = [theta_hat[p * 4 + 3] for p in block_peaks]
-        width = max([sLs[i] + sRs[i] for i in range(n_block)] + [1.0])
-        mask = np.zeros_like(x, dtype=bool)
-        for x0 in x0s:
-            mask |= (x >= x0 - window_factor * width) & (
-                x <= x0 + window_factor * width
-            )
-        if mask.sum() < 6:
-            mask = slice(None)  # use full data if local too small
-
-        # Build block Jacobian J_block (rows = mask.sum(), cols = 4*n_block)
-        rows = x[mask] if not isinstance(mask, slice) else x
-        f0_block = f0[mask] if not isinstance(mask, slice) else f0
-        J_block = np.zeros((len(rows), 4 * n_block))
-        for col_idx, gidx in enumerate(idxs):
-            step = theta_hat[gidx] * dlog
-            if step == 0:
-                step = dlog
-            theta_step = theta_hat.copy()
-            theta_step[gidx] = theta_hat[gidx] + step
-            f1 = model_func(x, *theta_step)
-            f1_block = f1[mask] if not isinstance(mask, slice) else f1
-            J_block[:, col_idx] = (f1_block - f0_block) / step
-
-        # SVD and truncated pseudo-inverse for block covariance
-        U, svals_block, VT = np.linalg.svd(J_block, full_matrices=False)
-        cutoff = svals_block[0] * rcond
-        kept_block = int(np.sum(svals_block > cutoff))
-        s_inv = np.zeros_like(svals_block)
-        s_inv[svals_block > cutoff] = 1.0 / svals_block[svals_block > cutoff]
-        JTJ_pinv_block = (
-            VT.T * s_inv
-        ) @ U.T  # pseudo-inverse of J_block (since SVD on J)
-        # Convert to parameter covariance: Cov_block = sigma^2 * (J^T J)^+ = sigma^2 * JTJ_pinv_block
-        # Need sigma estimate (use global residuals if available)
-        residuals = y - f0
-        sigma_est = np.sqrt(np.sum(residuals**2) / max(1, (N - len(theta_hat))))
-        Cov_block = (sigma_est**2) * JTJ_pinv_block
-
-        # Extract marginal covariance for the central peak within block
-        # Find local offset of center in block_peaks
-        center_pos_in_block = block_peaks.index(center)
-        local_base = center_pos_in_block * 4
-        Cov_local = Cov_block[local_base : local_base + 4, local_base : local_base + 4]
-
-        # Compute integral and stderr_I depending on paramization
-        # We must detect whether model_func expects amplitude or integral first param.
-        # We assume theta ordering is [I/x, x0, sL, sR]; user should ensure consistency.
-        I_val = theta_hat[center * 4 + 0]
-        stderr_I = np.sqrt(max(Cov_local[0, 0], 0.0))
-
-        # Build J_local for scoring: use block's columns restricted to central peak columns
-        # This gives columns with the same scaling as used in the block
-        cols_local = list(range(center_pos_in_block * 4, center_pos_in_block * 4 + 4))
-        J_local = J_block[:, cols_local]
-
-        # compute the lightweight quality score for this central peak from its local block info
-        score_dict = _peak_quality_score_from_J_local(J_local, rcond=rcond)
-
-        # Overwrite kept to reflect block-kept if that is more informative
-        score_dict["block_svals"] = svals_block
-        score_dict["block_kept"] = kept_block
-        score_dict["block_cond"] = float(svals_block[0] / (svals_block[-1] + 1e-30))
-        score_dict["block_peaks"] = block_peaks
-        score_dict["Cov_local"] = Cov_local
-        score_dict["I"] = float(I_val)
-        score_dict["stderr_I"] = float(stderr_I)
-
-        cond_block = svals_block[0] / (svals_block[-1] + 1e-30)
-        logc = np.log10(cond_block)
-        # sigmoid from 0 (good) to 1 (bad) between cond 1e6–1e10
-        p = 1 / (1 + np.exp(-(logc - 8) / 0.8))
-        score_dict["score"] *= 1 - 0.8 * p
-        score_dict["overlap_penalty"] = p
-        score_dict["block_cond"] = cond_block
-
-        # Friendly message tweak: if block shows strong cross-coupling (kept_block < 4*n_block)
-        if kept_block < 4 * n_block:
-            score_dict["message"] = (
-                score_dict.get("message", "") + f"; block rank {kept_block}/{4*n_block}"
-            )
-        results.append(score_dict)
-
+    log(
+        f"Laplace analysis done (noise {sigma:.3g})"
+        + (f", {int(np.sum(~keep))} degenerate direction(s)" if not np.all(keep) else "")
+    )
     return results

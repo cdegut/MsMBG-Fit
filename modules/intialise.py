@@ -11,6 +11,8 @@ from modules.finding import (
     redraw_user_peaks,
 )
 from modules.fitting.MBGfit import update_peak_starting_points
+from modules.fitting.dpg_callbacks import draw_fitted_peaks, show_stop_reason
+from modules.fitting.fitting_quality import laplace_covariance_analysis
 from modules.matching_dpg import peak_series_callback
 from modules.utils import log
 
@@ -99,6 +101,11 @@ def initialise_windows(render_callback):
     redraw_user_peaks(render_callback)
     data_clipper()
     update_peak_starting_points(spectrum)
+    # Show the saved fit (peaks and statistics table) in the fitting tab
+    render_callback.fit_summary = None
+    show_stop_reason(None)
+    laplace_covariance_analysis()
+    draw_fitted_peaks()
 
 
 def file_dialog(render_callback):
@@ -162,6 +169,9 @@ def open_pkl_callback(sender, app_data, user_data):
     spectrum: MSData = user_data.spectrum
     log(f"Path: {app_data['file_path_name']}")
     spectrum.load_from_file(app_data["file_path_name"])
+    if len(spectrum.original_data) == 0:
+        log("This file contains no spectrum data (empty session saved?)")
+        return
     initialise_windows(render_callback)
 
 

@@ -1,5 +1,6 @@
 from modules.data_structures import (
     FitQualityPeakMetrics,
+    FitSummary,
     MSData,
     peak_params,
     get_global_msdata_ref,
@@ -11,8 +12,9 @@ from modules.fitting.fitting_quality import (
     FitQualityMetricsReduced,
     advanced_statistical_analysis,
     calculate_fit_quality_metrics,
+    laplace_covariance_analysis,
 )
-from modules.math import check_theta_convergence
+from modules.math import check_theta_convergence, combine_errors
 from modules.fitting.peak_starting_points import update_peak_starting_points
 import numpy as np
 from modules.fitting.refiner import refine_iteration
@@ -105,6 +107,7 @@ def MBG_fit(
     if working_peak_list is None:
         return
 
+    spectrum.laplace_integral_corr = None
     i = 0
     for peak in working_peak_list:
         spectrum.peaks[peak].A_refined = spectrum.peaks[peak].A_init
@@ -116,10 +119,23 @@ def MBG_fit(
         spectrum.peaks[peak].se_A = -1
         spectrum.peaks[peak].se_x0 = -1
         spectrum.peaks[peak].se_integral = -1
+        spectrum.peaks[peak].se_integral_bootstrap = -1.0
+        spectrum.peaks[peak].se_integral_restart = -1.0
+        spectrum.peaks[peak].se_x0_bootstrap = -1.0
+        spectrum.peaks[peak].se_x0_restart = -1.0
         spectrum.peaks[peak].regression_fct = (0.0, 0.0)
         spectrum.peaks[peak].fit_quality = FitQualityPeakMetrics(0.0, 0.0, 1.0, 0.0)
         spectrum.peaks[peak].integral = 0.0
         spectrum.peaks[peak].fitted = False
+        spectrum.peaks[peak].laplace_se_integral = -1.0
+        spectrum.peaks[peak].laplace_se_x0 = -1.0
+        spectrum.peaks[peak].laplace_area_corr = 0.0
+        spectrum.peaks[peak].laplace_area_peak = -1
+        spectrum.peaks[peak].laplace_corr_left = 0.0
+        spectrum.peaks[peak].laplace_corr_right = 0.0
+        spectrum.peaks[peak].laplace_left_peak = -1
+        spectrum.peaks[peak].laplace_right_peak = -1
+        spectrum.peaks[peak].laplace_message = ""
         i += 1
 
     fit = refine_peak_parameters(
@@ -182,12 +198,17 @@ def refine_peak_parameters(
     oscillation_detected = False
 
     current_metric = 0.0
+    r_squared = 0.0
+    r_squared_convergence = dpg.get_value("fitting_r2")
+    stop_reason = "max_iter"  # overwritten if another criterion ends the loop
     for k in range(iterations + 1):
 
         iteration_start = time.time()
         render_callback.execute()
-        if dpg.get_value("stop_fitting_checkbox") or render_callback.stop_fitting:
+        if dpg.get_value("stop_fitting_button") or render_callback.stop_fitting:
             log("Fitting stopped by user")
+            dpg.set_item_label("stop_fitting_button", "Stopping...")
+            stop_reason = "user"
             break
 
         quality_metrics: FitQualityMetricsReduced = calculate_fit_quality_metrics(
@@ -233,10 +254,15 @@ def refine_peak_parameters(
             f"Iter {k}: wRMSE: {current_metric:.4f}, R²: {r_squared:.4f}, Parameters change: {delta_theta:.4e}, iteration time: {time.time() - iteration_start:.2f}s",
         )
         alpha_convergence = 0.95
-        r_squared_convergence = dpg.get_value("fitting_r2")
         # Check convergence using multiple criteria
-        converged = theta_converged or r_squared > r_squared_convergence
-        if converged:
+        r2_converged = r_squared > r_squared_convergence
+        if theta_converged or r2_converged:
+            if theta_converged and r2_converged:
+                stop_reason = "theta+r2"
+            elif theta_converged:
+                stop_reason = "theta"
+            else:
+                stop_reason = "r2"
             break
 
         if oscillation_detected:
@@ -292,18 +318,36 @@ def refine_peak_parameters(
     r_squared = full_quality_metrics.r_squared
 
     time_taken = time.time() - start
+    fit_summary = FitSummary(
+        stop_reason=stop_reason,
+        iterations_done=k,
+        max_iterations=iterations,
+        delta_theta=float(delta_theta),
+        theta_threshold=theta_threshold,
+        r_squared=float(r_squared),
+        r_squared_threshold=r_squared_convergence,
+        weighted_rmse=float(current_metric),
+        chi_squared_reduced=float(chi_squared),
+        signal_to_noise=float(signal_to_noise),
+        aic=float(full_quality_metrics.aic),
+        bic=float(full_quality_metrics.bic),
+        residual_autocorr=float(full_quality_metrics.residual_autocorr),
+        time_taken=time_taken,
+    )
+    render_callback.fit_summary = fit_summary
     log(
-        f"Converged: R²={r_squared:.4f}, X²r={chi_squared:.3f}, SNR={signal_to_noise:.1f}, Time: {time_taken:.2f}s"
+        f"{stop_reason_text(fit_summary)}: R²={r_squared:.4f}, X²r={chi_squared:.3f}, SNR={signal_to_noise:.1f}, Time: {time_taken:.2f}s"
     )
 
+    median_error = np.median(peaks_error) if peaks_error else float("nan")
     dpg.set_value(
         "Fitting_indicator_text",
-        f"Converged after {k} iterations. wRMSE={current_metric:.4f}, R²={r_squared:.4f}, "
-        f"X²r={chi_squared:.3f}, Median peak error={np.median(peaks_error):.4f}, Time: {time_taken:.2f}s",
+        f"{stop_reason_text(fit_summary)} after {k} iterations. wRMSE={current_metric:.4f}, R²={r_squared:.4f}, "
+        f"X²r={chi_squared:.3f}, Median peak error={median_error:.4f}, Time: {time_taken:.2f}s",
     )
     render_callback.iterations_done = k
     render_callback.finishing_delta_theta = (
-        float(delta_theta) if delta_theta is not 0 else 5e-5
+        float(delta_theta) if delta_theta != 0 else 5e-5
     )
 
     for peak in working_peak_list:
@@ -315,14 +359,44 @@ def refine_peak_parameters(
     return True
 
 
+def stop_reason_text(fit_summary: FitSummary) -> str:
+    return {
+        "max_iter": "Not converged: iteration limit reached",
+        "theta": "Converged: parameter change below threshold",
+        "r2": "Converged: R² above threshold",
+        "theta+r2": "Converged: parameter change and R² thresholds",
+        "user": "Stopped by user",
+    }.get(fit_summary.stop_reason, fit_summary.stop_reason)
+
+
 def run_advanced_statistical_analysis():
     # Calculate standard errors boot strap and refitting with perturbation
     spectrum = get_global_msdata_ref()
     render_callback = get_global_render_callback_ref()
     working_peak_list = render_callback.working_peak_list
-    data_x = spectrum.working_data[:, 0]
+    if not working_peak_list:
+        # Fit loaded from a file: no fit ran in this session
+        working_peak_list = [
+            peak
+            for peak in spectrum.peaks
+            if spectrum.peaks[peak].fitted and not spectrum.peaks[peak].do_not_fit
+        ]
+        render_callback.working_peak_list = working_peak_list
+    if not working_peak_list:
+        log("No fitted peaks: run the fitting first")
+        return
+    if render_callback.iterations_done == 0:
+        render_callback.iterations_done = dpg.get_value("fitting_iterations")
+    if render_callback.finishing_delta_theta == 0:
+        render_callback.finishing_delta_theta = (
+            dpg.get_value("theta_threshold_selector") * 1e-5
+        )
+    data_x = spectrum.baseline_corrected[:, 0]
     data_y = spectrum.baseline_corrected[:, 1]
     k = render_callback.iterations_done
+
+    # Laplace errors of the current fit, combined with the bootstrap below
+    laplace_covariance_analysis()
 
     quality_metrics = calculate_fit_quality_metrics(
         data_x, data_y, spectrum, working_peak_list, rmse_only=True
@@ -358,39 +432,41 @@ def run_advanced_statistical_analysis():
         theta_threshold=render_callback.finishing_delta_theta * 2,
         method="initial",
     )
+    if errors_random_start is False and dpg.get_value("stop_fitting_button"):
+        return  # stopped by the user: keep the previous errors
 
-    # Store standard errors in peak parameters
+    # Store standard errors in peak parameters.
+    # Final error = largest of bootstrap, Laplace and random restarts (see combine_errors).
     for peak in working_peak_list:
-        if errors_random_start is False:
-            err_rs = None
-        else:
-            err_rs = errors_random_start[peak]
-        err_bs = error_bootstrap[peak]
-        if err_rs is not None and err_bs is not None:
-            spectrum.peaks[peak].se_A = max(err_rs["A"], err_bs["A"])
-            spectrum.peaks[peak].se_x0 = max(err_rs["x0"], err_bs["x0"])
-            spectrum.peaks[peak].se_sigma_L = max(err_rs["sigma_L"], err_bs["sigma_L"])
-            spectrum.peaks[peak].se_sigma_R = max(err_rs["sigma_R"], err_bs["sigma_R"])
-            spectrum.peaks[peak].se_integral = max(
-                err_rs["integral"], err_bs["integral"]
-            )
-            spectrum.peaks[peak].se_base = max(err_rs["base"], err_bs["base"])
-        elif err_rs is not None:
-            spectrum.peaks[peak].se_A = err_rs["A"]
-            spectrum.peaks[peak].se_x0 = err_rs["x0"]
-            spectrum.peaks[peak].se_sigma_L = err_rs["sigma_L"]
-            spectrum.peaks[peak].se_sigma_R = err_rs["sigma_R"]
-            spectrum.peaks[peak].se_integral = err_rs["integral"]
-            spectrum.peaks[peak].se_base = err_rs["base"]
-        elif err_bs is not None:
-            spectrum.peaks[peak].se_A = err_bs["A"]
-            spectrum.peaks[peak].se_x0 = err_bs["x0"]
-            spectrum.peaks[peak].se_sigma_L = err_bs["sigma_L"]
-            spectrum.peaks[peak].se_sigma_R = err_bs["sigma_R"]
-            spectrum.peaks[peak].se_integral = err_bs["integral"]
-            spectrum.peaks[peak].se_base = err_bs["base"]
-        else:
+        p = spectrum.peaks[peak]
+        err_bs = error_bootstrap.get(peak)
+        err_rs = errors_random_start.get(peak) if errors_random_start else None
+        if err_bs is None and err_rs is None:
             continue
+
+        def component(errors, key):
+            if errors is None or not np.isfinite(errors[key]):
+                return -1.0
+            return float(errors[key])
+
+        p.se_integral_bootstrap = component(err_bs, "integral")
+        p.se_integral_restart = component(err_rs, "integral")
+        p.se_x0_bootstrap = component(err_bs, "x0")
+        p.se_x0_restart = component(err_rs, "x0")
+        laplace_integral = (
+            p.laplace_se_integral * p.integral if p.laplace_se_integral > 0 else -1.0
+        )
+
+        p.se_integral = combine_errors(
+            [p.se_integral_bootstrap, laplace_integral], p.se_integral_restart
+        )
+        p.se_x0 = combine_errors([p.se_x0_bootstrap, p.laplace_se_x0], p.se_x0_restart)
+        for key in ("A", "sigma_L", "sigma_R", "base"):
+            setattr(
+                p,
+                f"se_{key}",
+                combine_errors([component(err_bs, key)], component(err_rs, key)),
+            )
 
 
 def update_peak_params(peak_list, popt, spectrum: MSData):

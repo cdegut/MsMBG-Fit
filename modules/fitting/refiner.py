@@ -1,7 +1,51 @@
 from modules.data_structures import MSData
 import numpy as np
 
-from modules.math import bi_Lorentzian_integral, bi_gaussian_integral
+from modules.math import (
+    bi_Lorentzian,
+    bi_Lorentzian_integral,
+    bi_gaussian,
+    bi_gaussian_integral,
+)
+
+# Multiply the refiner's steps before the step limits are applied (1.0 = original
+# behaviour). The integral step is already about the full correction (blended in at
+# 40 %), so INTEGRAL_GAIN above ~2.5 overshoots; the apex and width steps use fixed
+# divisors and are much smaller than their natural scale (SHAPE_GAIN).
+INTEGRAL_GAIN = 1.0
+SHAPE_GAIN = 1.0
+
+# Safeguard: in one iteration a peak's integral may shrink at most to this fraction
+# of its current value (and never become negative). Without it, a weak, poorly
+# constrained peak can be pushed to zero and its neighbours then run away.
+MIN_INTEGRAL_RATIO = 0.8
+
+# Test switch: direction of the apex step from the fit of the whole peak region (see
+# _apex_direction). The original rule compares two narrow windows next to the apex;
+# for asymmetric peaks it is biased to the right and can move the apex the wrong
+# way, a cause of slow drift. The step size is unchanged.
+# Off: tested on Um2x / Um4x it makes the whole refiner unstable (a weak peak
+# collapses and its neighbours run away).
+APEX_DIRECTION_FROM_FIT = True
+
+
+def _apex_direction(spectrum, peak, data_x, data_y, x0, sigma_L, sigma_R) -> float:
+    """
+    +1 / -1: the direction of apex shift that reduces the residual over the peak
+    region (x0 - 3 sigma_L to x0 + 3 sigma_R), the sign of
+    sum(residual * d(peak profile)/d(x0)); 0 if undetermined.
+    """
+    region = (data_x >= x0 - 3 * sigma_L) & (data_x <= x0 + 3 * sigma_R)
+    if np.count_nonzero(region) < 3:
+        return 0.0
+    x = data_x[region]
+    residual = data_y[region] - spectrum.calculate_mbg(x, fitting=True)
+    profile = bi_Lorentzian if spectrum.peak_model == "lorentzian" else bi_gaussian
+    A = spectrum.peaks[peak].A_refined
+    h = 1e-3 * (sigma_L + sigma_R) / 2
+    g = (profile(x, A, x0 + h, sigma_L, sigma_R) - profile(x, A, x0 - h, sigma_L, sigma_R)) / (2 * h)
+    gradient = float(np.sum(residual * g))
+    return float(np.sign(gradient)) if np.isfinite(gradient) else 0.0
 
 
 def refine_iteration(
@@ -13,7 +57,11 @@ def refine_iteration(
     force_gaussian=False,
     widths=(-1, -1, -1, -1),
     alpha=0.8,
+    integral_gain=None,
+    shape_gain=None,
 ):
+    integral_gain = INTEGRAL_GAIN if integral_gain is None else integral_gain
+    shape_gain = SHAPE_GAIN if shape_gain is None else shape_gain
     x0_fit = spectrum.peaks[peak].x0_refined
     sigma_L_fit = spectrum.peaks[peak].sigma_L
     sigma_R_fit = spectrum.peaks[peak].sigma_R
@@ -59,10 +107,11 @@ def refine_iteration(
 
     if not np.isfinite(integral_fit) or integral_fit <= 0:
         integral_fit = 1.0
+    integral_current = integral_fit
 
     R_val = sigma_R_fit if sigma_R_fit > sampling_rate * 20 else sampling_rate * 5
     L_val = sigma_L_fit if sigma_L_fit > sampling_rate * 20 else sampling_rate * 5
-    mask = (data_x >= x0_fit - R_val) & (data_x <= x0_fit + L_val)
+    mask = (data_x >= x0_fit - L_val) & (data_x <= x0_fit + R_val)
     data_x_peak = data_x[mask]
     data_y_peak = data_y[mask]
 
@@ -70,7 +119,8 @@ def refine_iteration(
         model_y = spectrum.calculate_mbg(data_x_peak, fitting=True)
         residual = data_y_peak - model_y
         # Empirical adjustment: scale integral with local mean residual
-        integral_fit += np.mean(residual) * (sigma_L_fit + sigma_R_fit)
+        integral_fit += integral_gain * np.mean(residual) * (sigma_L_fit + sigma_R_fit)
+        integral_fit = max(integral_fit, MIN_INTEGRAL_RATIO * integral_current)
 
     ############
     # Move x0
@@ -108,9 +158,13 @@ def refine_iteration(
             # Only adjust if asymmetry is significant
             if abs(error_diff) > abs(error_l + error_r) / 10:
                 # Conservative adjustment
-                offset = error_diff / (10000) * (sigma_L_fit + sigma_R_fit) / 2
+                offset = shape_gain * error_diff / (10000) * (sigma_L_fit + sigma_R_fit) / 2
                 max_offset = (sigma_L_fit + sigma_R_fit) / 200
                 offset = np.clip(offset, -max_offset, max_offset)
+                if APEX_DIRECTION_FROM_FIT:
+                    offset = abs(offset) * _apex_direction(
+                        spectrum, peak, data_x, data_y, x0_fit, sigma_L_fit, sigma_R_fit
+                    )
                 x0_fit = x0_fit + offset
 
         # Sharpen the peak
@@ -153,8 +207,8 @@ def refine_iteration(
 
         max_adjustment = original_peak_width * 0.01  # 1% of original width
 
-        sigma_L_adjustment = np.clip(error_l / val, -max_adjustment, max_adjustment)
-        sigma_R_adjustment = np.clip(error_r / val, -max_adjustment, max_adjustment)
+        sigma_L_adjustment = np.clip(shape_gain * error_l / val, -max_adjustment, max_adjustment)
+        sigma_R_adjustment = np.clip(shape_gain * error_r / val, -max_adjustment, max_adjustment)
 
         sigma_L_fit = sigma_L_fit + sigma_L_adjustment
         sigma_R_fit = sigma_R_fit + sigma_R_adjustment

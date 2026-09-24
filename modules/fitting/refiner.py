@@ -15,6 +15,7 @@ from modules.math import (
 INTEGRAL_GAIN = 1.0
 SHAPE_GAIN = 1.0
 
+
 # Safeguard: in one iteration a peak's integral may shrink at most to this fraction
 # of its current value (and never become negative). Without it, a weak, poorly
 # constrained peak can be pushed to zero and its neighbours then run away.
@@ -26,7 +27,7 @@ MIN_INTEGRAL_RATIO = 0.8
 # way, a cause of slow drift. The step size is unchanged.
 # Off: tested on Um2x / Um4x it makes the whole refiner unstable (a weak peak
 # collapses and its neighbours run away).
-APEX_DIRECTION_FROM_FIT = True
+APEX_DIRECTION_FROM_FIT = False
 
 
 def _apex_direction(spectrum, peak, data_x, data_y, x0, sigma_L, sigma_R) -> float:
@@ -46,6 +47,39 @@ def _apex_direction(spectrum, peak, data_x, data_y, x0, sigma_L, sigma_R) -> flo
     g = (profile(x, A, x0 + h, sigma_L, sigma_R) - profile(x, A, x0 - h, sigma_L, sigma_R)) / (2 * h)
     gradient = float(np.sum(residual * g))
     return float(np.sign(gradient)) if np.isfinite(gradient) else 0.0
+
+
+# Test switch: keep a peak's update only if it lowers the residual over the peak's
+# region (old and new extent, +-3 sigma, including the overlap with its neighbours);
+# otherwise try 1/2, 1/4, 1/8 of the step, then keep the old values. Makes every
+# accepted step an improvement. Note: width regularisation pulls that cost fit
+# quality are then rejected too. False = original behaviour.
+ACCEPT_ONLY_IMPROVING = False
+BACKTRACK_STEPS = 3
+
+
+def _accept_only_improving(spectrum, peak, previous, data_x, data_y):
+    q = spectrum.peaks[peak]
+    new = (q.A_refined, q.x0_refined, q.sigma_L, q.sigma_R, q.integral)
+    low = min(previous[1] - 3 * previous[2], new[1] - 3 * new[2])
+    high = max(previous[1] + 3 * previous[3], new[1] + 3 * new[3])
+    region = (data_x >= low) & (data_x <= high)
+    if np.count_nonzero(region) < 3:
+        return
+    x, y = data_x[region], data_y[region]
+
+    def local_ssr(values):
+        q.A_refined, q.x0_refined, q.sigma_L, q.sigma_R, q.integral = values
+        return float(np.sum((y - spectrum.calculate_mbg(x, fitting=True)) ** 2))
+
+    ssr_previous = local_ssr(previous)
+    step = 1.0
+    for _ in range(BACKTRACK_STEPS + 1):
+        candidate = tuple(p0 + step * (p1 - p0) for p0, p1 in zip(previous, new))
+        if local_ssr(candidate) <= ssr_previous:
+            return  # accepted (values already set)
+        step *= 0.5
+    local_ssr(previous)  # no improving step: keep the old values
 
 
 def refine_iteration(
@@ -323,6 +357,8 @@ def refine_iteration(
                 sigma_R_fit = neighbor_R_median / max_width_ratio - deficit * softness
 
     alpha_A = 0.4 if alpha > 0.4 else alpha
+    q = spectrum.peaks[peak]
+    previous = (q.A_refined, q.x0_refined, q.sigma_L, q.sigma_R, q.integral)
     spectrum.peaks[peak].sigma_L = float(
         alpha * sigma_L_fit + (1 - alpha) * spectrum.peaks[peak].sigma_L
     )
@@ -343,3 +379,6 @@ def refine_iteration(
         alpha_A * A_new + (1 - alpha_A) * spectrum.peaks[peak].A_refined
     )
     spectrum.peaks[peak].integral = integral_fit
+
+    if ACCEPT_ONLY_IMPROVING:
+        _accept_only_improving(spectrum, peak, previous, data_x, data_y)

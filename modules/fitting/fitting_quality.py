@@ -276,8 +276,13 @@ def advanced_statistical_analysis(
     check_convergence: Literal["wRMSE", "theta-gradient", "both", False] = False,
     wRMSE_threshold: float = 100.0,
     theta_threshold: float = 1e-4,
+    r2_threshold: Optional[float] = None,
 ) -> dict | Literal[False]:
-    """Perform advanced statistical analysis using bootstrap and random start methods."""
+    """
+    Perform advanced statistical analysis using bootstrap and random start methods.
+    Refits stop like the main fit: parameters stable (theta_threshold), or
+    R² above r2_threshold.
+    """
 
     # Compute fitted values and residuals
     y_fitted = spectrum.calculate_mbg(data_x, fitting=True)
@@ -409,6 +414,7 @@ def advanced_statistical_analysis(
                     theta_threshold=theta_threshold,
                 )
 
+            task.r2_threshold = r2_threshold
             task_pool.append(task)
 
         stop_event = multiprocessing.Event()
@@ -543,6 +549,7 @@ class QuickFitInterface:
     width_regularization: bool
     it_index: int
     convergence_window: int = CONVERGENCE_WINDOW
+    r2_threshold: Optional[float] = None  # stop when R² is above it, as the main fit
 
 
 def execute_quick_fit(task: QuickFitInterface):
@@ -558,6 +565,7 @@ def execute_quick_fit(task: QuickFitInterface):
         task.width_regularization,
         task.it_index,
         task.convergence_window,
+        task.r2_threshold,
     )
 
 
@@ -573,6 +581,7 @@ def quick_fit_model(
     width_regularization: bool = True,
     it_index: int = 0,
     convergence_window: int = CONVERGENCE_WINDOW,
+    r2_threshold: Optional[float] = None,
 ) -> tuple[Dict[int, peak_params], bool, int]:
     iteration = 0
     try:
@@ -629,6 +638,11 @@ def quick_fit_model(
                 list(working_peaks.keys()),
                 rmse_only=True,
             )
+
+            # Same stopping rule as the main fit: R² above the threshold
+            if r2_threshold is not None and quality_metrics.r_squared > r2_threshold:
+                converged = True
+                break
 
             if check_convergence:
                 rmse_converged = False

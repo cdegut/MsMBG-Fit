@@ -424,6 +424,7 @@ def run_advanced_statistical_analysis():
         check_convergence="theta-gradient",
         wRMSE_threshold=quality_metrics.weighted_rmse * 1.05,
         theta_threshold=convergence_threshold,
+        r2_threshold=dpg.get_value("fitting_r2"),
     )
 
     if error_bootstrap is False:
@@ -440,6 +441,7 @@ def run_advanced_statistical_analysis():
         check_convergence="theta-gradient",
         wRMSE_threshold=quality_metrics.weighted_rmse * 1.1,
         theta_threshold=convergence_threshold,
+        r2_threshold=dpg.get_value("fitting_r2"),
         method="initial",
     )
     if errors_random_start is False and dpg.get_value("stop_fitting_button"):

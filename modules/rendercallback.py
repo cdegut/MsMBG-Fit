@@ -22,7 +22,15 @@ class RenderCallback:
         self.working_peak_list: List[int] = []
         self.iterations_done: int = 0
         self.finishing_delta_theta: float = 0.0
-        self.fit_summary = None  # FitSummary of the last MBG fit
+
+    @property
+    def fit_summary(self):
+        """FitSummary of the last MBG fit, stored in the spectrum so it is saved with it."""
+        return self.spectrum.fit_summary
+
+    @fit_summary.setter
+    def fit_summary(self, value):
+        self.spectrum.fit_summary = value
 
     def execute(self):
         now = time.time()

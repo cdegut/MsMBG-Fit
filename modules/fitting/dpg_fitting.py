@@ -136,9 +136,9 @@ def fitting_window(render_callback):
                             dpg.add_text("Max iterations:", tag="stop_iter_label")
                             dpg.add_input_int(
                                 label="",
-                                default_value=3000,
+                                default_value=1000,
                                 min_value=50,
-                                max_value=20000,
+                                max_value=5000,
                                 width=150,
                                 tag="fitting_iterations",
                                 callback=update_stop_criteria_label,

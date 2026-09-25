@@ -102,8 +102,7 @@ def initialise_windows(render_callback):
     data_clipper()
     update_peak_starting_points(spectrum)
     # Show the saved fit (peaks and statistics table) in the fitting tab
-    render_callback.fit_summary = None
-    show_stop_reason(None)
+    show_stop_reason(render_callback.fit_summary)
     laplace_covariance_analysis()
     draw_fitted_peaks()
 

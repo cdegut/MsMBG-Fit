@@ -36,6 +36,8 @@ class MSData:
         # Correlation matrix of peak integrals from the Laplace analysis
         # {"peaks": [peak ids], "matrix": ndarray}, None when not computed
         self.laplace_integral_corr: Optional[dict] = None
+        # FitSummary of the last MBG fit, None when no fit was run
+        self.fit_summary: Optional[FitSummary] = None
 
     def import_csv(self, path: str):
         return True
@@ -48,6 +50,7 @@ class MSData:
         else:
             self.original_data = np.empty((0, 2))
         self.working_data = self.original_data
+        self.fit_summary = None
         self.correct_baseline(0)
 
     def clip_data(self, L_clip: int, R_clip: int):
@@ -275,6 +278,7 @@ class MSData:
         self.peaks = {
             peak: upgrade_peak_params(params) for peak, params in self.peaks.items()
         }
+        self.fit_summary = upgrade_fit_summary(self.fit_summary)
 
 
 ms_data_global_ref = MSData()
@@ -384,6 +388,16 @@ def upgrade_peak_params(old: peak_params) -> peak_params:
         r_squared=quality.get("r_squared", 0.0),
     )
     return peak
+
+
+def upgrade_fit_summary(old: Optional[FitSummary]) -> Optional[FitSummary]:
+    """Drop a summary loaded from an older file if it misses current fields."""
+    if old is None:
+        return None
+    saved = getattr(old, "__dict__", {})
+    if not all(name in saved for name in FitSummary.__dataclass_fields__):
+        return None
+    return FitSummary(**{name: saved[name] for name in FitSummary.__dataclass_fields__})
 
 
 def fft_filter_data(y_data, cutoff_frequency=0.1, sampling_rate=1.0):

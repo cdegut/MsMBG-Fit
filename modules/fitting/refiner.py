@@ -93,9 +93,15 @@ def refine_iteration(
     alpha=0.8,
     integral_gain=None,
     shape_gain=None,
+    accept_only_improving=None,
 ):
     integral_gain = INTEGRAL_GAIN if integral_gain is None else integral_gain
     shape_gain = SHAPE_GAIN if shape_gain is None else shape_gain
+    # Passed explicitly by the fits (GUI option): the refits run in worker
+    # processes, which would not see a change of the module constant
+    accept_only_improving = (
+        ACCEPT_ONLY_IMPROVING if accept_only_improving is None else accept_only_improving
+    )
     x0_fit = spectrum.peaks[peak].x0_refined
     sigma_L_fit = spectrum.peaks[peak].sigma_L
     sigma_R_fit = spectrum.peaks[peak].sigma_R
@@ -380,5 +386,5 @@ def refine_iteration(
     )
     spectrum.peaks[peak].integral = integral_fit
 
-    if ACCEPT_ONLY_IMPROVING:
+    if accept_only_improving:
         _accept_only_improving(spectrum, peak, previous, data_x, data_y)

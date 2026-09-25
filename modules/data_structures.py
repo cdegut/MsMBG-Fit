@@ -6,7 +6,7 @@ import numpy as np
 from dataclasses import dataclass
 from modules.math import multi_bi_gaussian, multi_bi_Lorentzian
 from typing import Dict, Tuple
-from dataclasses import field
+from dataclasses import MISSING, field
 import pickle
 import pandas as pd
 from whittaker_eilers import WhittakerSmoother
@@ -66,6 +66,9 @@ class MSData:
             window_length = window_length - 1
         if window_length % 2 == 0:
             window_length -= 1  # Ensure window_length is odd
+
+        if baseline:
+            self.ensure_baseline_consistent()
 
         whittaker_smoother = WhittakerSmoother(
             lmbda=window_length,
@@ -168,6 +171,17 @@ class MSData:
             self.baseline_need_update = False
         except:
             return
+
+    def ensure_baseline_consistent(self) -> None:
+        """
+        Recompute the baseline when it no longer matches working_data (clipping or
+        loading a session changes working_data before the render loop catches up).
+        """
+        if len(self.baseline_corrected) == len(self.working_data) and np.array_equal(
+            self.baseline_corrected[:, 0], self.working_data[:, 0]
+        ):
+            return
+        self.correct_baseline(self.baseline_window)
 
     def fft_filter_data(self, cutoff_frequency=0.1):
         if len(self.working_data) <= 2:
@@ -279,6 +293,8 @@ class MSData:
             peak: upgrade_peak_params(params) for peak, params in self.peaks.items()
         }
         self.fit_summary = upgrade_fit_summary(self.fit_summary)
+        # Sessions can be saved with a baseline computed on a different clipping
+        self.ensure_baseline_consistent()
 
 
 ms_data_global_ref = MSData()
@@ -298,7 +314,8 @@ class FitQualityPeakMetrics:
 
 @dataclass
 class FitSummary:
-    # Which stopping criterion ended the fit: "max_iter", "theta", "r2", "theta+r2" or "user"
+    # Which stopping criterion ended the fit: "max_iter", "user", or the criteria met
+    # joined by "+" among "theta", "r2" and "flat" (e.g. "theta+r2")
     stop_reason: str
     iterations_done: int
     max_iterations: int
@@ -313,6 +330,9 @@ class FitSummary:
     bic: float
     residual_autocorr: float
     time_taken: float
+    # Tangent of the R² evolution: relative residual drop over the last window
+    r2_flat_gain: float = float("nan")
+    r2_flat_threshold: float = 0.0
 
 
 @dataclass
@@ -391,13 +411,22 @@ def upgrade_peak_params(old: peak_params) -> peak_params:
 
 
 def upgrade_fit_summary(old: Optional[FitSummary]) -> Optional[FitSummary]:
-    """Drop a summary loaded from an older file if it misses current fields."""
+    """
+    Drop a summary loaded from an older file if it misses current fields; fields
+    with a default (added later) are filled with it.
+    """
     if old is None:
         return None
     saved = getattr(old, "__dict__", {})
-    if not all(name in saved for name in FitSummary.__dataclass_fields__):
+    fields = FitSummary.__dataclass_fields__
+    required = [
+        name
+        for name, f in fields.items()
+        if f.default is MISSING and f.default_factory is MISSING
+    ]
+    if not all(name in saved for name in required):
         return None
-    return FitSummary(**{name: saved[name] for name in FitSummary.__dataclass_fields__})
+    return FitSummary(**{name: saved[name] for name in fields if name in saved})
 
 
 def fft_filter_data(y_data, cutoff_frequency=0.1, sampling_rate=1.0):

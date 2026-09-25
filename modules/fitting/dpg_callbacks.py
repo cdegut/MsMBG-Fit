@@ -18,7 +18,11 @@ from modules.math import (
     bi_Lorentzian,
     bi_Lorentzian_integral,
 )
-from modules.fitting.fitting_quality import CONVERGENCE_WINDOW, laplace_covariance_analysis
+from modules.fitting.fitting_quality import (
+    CONVERGENCE_WINDOW,
+    R2_FLAT_WINDOW,
+    laplace_covariance_analysis,
+)
 from modules.rendercallback import get_global_render_callback_ref
 import seaborn as sns
 
@@ -74,9 +78,16 @@ STOP_REASON_SHORT = {
     "max_iter": "iteration limit (not converged)",
     "theta": "parameters stable",
     "r2": "R²",
-    "theta+r2": "parameters stable + R²",
+    "flat": "R² flat",
     "user": "user",
 }
+
+
+def stop_reason_short(reason: str) -> str:
+    """Short text of a stop reason; converged reasons are criteria joined by '+'."""
+    if reason in STOP_REASON_SHORT:
+        return STOP_REASON_SHORT[reason]
+    return " + ".join(STOP_REASON_SHORT.get(name, name) for name in reason.split("+"))
 
 
 def update_stop_criteria_label():
@@ -86,14 +97,16 @@ def update_stop_criteria_label():
         f"moves < {dpg.get_value('theta_threshold_selector'):g} SE / {CONVERGENCE_WINDOW} it. | "
         f"R² > {dpg.get_value('fitting_r2'):g}"
     )
+    if dpg.get_value("fitting_r2_flat") > 0:
+        label += f" | R² gain < {dpg.get_value('fitting_r2_flat'):g} % / {R2_FLAT_WINDOW} it."
     summary: FitSummary | None = get_global_render_callback_ref().fit_summary
     if summary is not None:
-        label += f"  ->  stopped by {STOP_REASON_SHORT.get(summary.stop_reason, summary.stop_reason)}"
+        label += f"  ->  stopped by {stop_reason_short(summary.stop_reason)}"
     dpg.set_item_label("stop_criteria_node", label)
 
 
 def reset_stop_reason():
-    for block in ("iter", "theta", "r2"):
+    for block in ("iter", "theta", "r2", "flat"):
         dpg.bind_item_theme(f"stop_{block}_label", 0)
         dpg.set_value(f"stop_{block}_status", "")
         dpg.bind_item_theme(f"stop_{block}_status", 0)
@@ -102,15 +115,17 @@ def reset_stop_reason():
 
 
 def show_stop_reason(fit_summary: FitSummary | None):
-    """Highlight which of the three stopping criteria ended the fit."""
+    """Highlight which of the stopping criteria ended the fit."""
     reset_stop_reason()
     if fit_summary is None:
         return
     reason = fit_summary.stop_reason
+    criteria = reason.split("+")
     hit = {
         "iter": reason == "max_iter",
-        "theta": "theta" in reason,
-        "r2": "r2" in reason,
+        "theta": "theta" in criteria,
+        "r2": "r2" in criteria,
+        "flat": "flat" in criteria,
     }
     dpg.set_value(
         "stop_iter_status",
@@ -123,6 +138,12 @@ def show_stop_reason(fit_summary: FitSummary | None):
         else "largest move: not measured yet",
     )
     dpg.set_value("stop_r2_status", f"last R²: {fit_summary.r_squared:.4f}")
+    dpg.set_value(
+        "stop_flat_status",
+        f"last gain: {100 * fit_summary.r2_flat_gain:.3g} % / {R2_FLAT_WINDOW} it."
+        if np.isfinite(fit_summary.r2_flat_gain)
+        else "last gain: not measured yet",
+    )
 
     for block, is_hit in hit.items():
         if not is_hit:

@@ -1,4 +1,5 @@
 import dearpygui.dearpygui as dpg
+from modules.fitting.MBGfit import BOOTSTRAP_SAMPLES, RESTART_SAMPLES
 from modules.fitting.dpg_callbacks import *
 
 
@@ -100,6 +101,22 @@ def fitting_window(render_callback):
                         default_value=True,
                         tag="use_reduced",
                     )
+                    dpg.add_checkbox(
+                        label="Accept only improving steps",
+                        default_value=False,
+                        tag="accept_only_improving",
+                    )
+                    with dpg.tooltip("accept_only_improving"):
+                        dpg.add_text(
+                            "A peak's update is kept only if it lowers the residual over "
+                            "the peak's region (+-3 sigma, including the overlap with its "
+                            "neighbours); otherwise 1/2, 1/4, 1/8 of the step are tried, "
+                            "then the old values are kept. Every accepted step is then an "
+                            "improvement, but steps of the width regularisation that cost "
+                            "fit quality are rejected too, and each iteration is slower. "
+                            "Also used by the error analysis refits.",
+                            wrap=380,
+                        )
                 # A selectable rather than a button: its value changes in the render
                 # thread immediately, while a button callback would be queued until
                 # the running fit callback returns.
@@ -181,6 +198,32 @@ def fitting_window(render_callback):
                                 step=0.001,
                             )
                             dpg.add_text("", tag="stop_r2_status")
+                        with dpg.group(horizontal=False):
+                            dpg.add_text(
+                                f"OR R² flat (residual gain % / {R2_FLAT_WINDOW} it.):",
+                                tag="stop_flat_label",
+                            )
+                            with dpg.tooltip("stop_flat_label"):
+                                dpg.add_text(
+                                    f"Converged when the tangent of the R² evolution is flat: "
+                                    f"at the slope of log(1 - R²) over the last {R2_FLAT_WINDOW} "
+                                    f"iterations, the unexplained part of the data would shrink by "
+                                    f"less than this percentage in {R2_FLAT_WINDOW} more iterations. "
+                                    f"Also used by the error analysis refits. 0 disables it.",
+                                    wrap=380,
+                                )
+                            dpg.add_input_float(
+                                label="",
+                                default_value=0.5,
+                                step=0.05,
+                                min_value=0.0,
+                                min_clamped=True,
+                                format="%.2f",
+                                width=150,
+                                tag="fitting_r2_flat",
+                                callback=update_stop_criteria_label,
+                            )
+                            dpg.add_text("", tag="stop_flat_status")
 
         # Row 2: final error analysis, its status on the right
         with dpg.group(horizontal=True, horizontal_spacing=20):
@@ -194,8 +237,8 @@ def fitting_window(render_callback):
             dpg.bind_item_theme(dpg.last_item(), "primary_button_theme")
             with dpg.tooltip("advanced_statistical_analysis_button"):
                 dpg.add_text(
-                    "Parametric bootstrap (128 resamples, about 1-2 minutes) and random "
-                    "restarts (16 refits from randomised starts, several minutes). Every "
+                    f"Parametric bootstrap ({BOOTSTRAP_SAMPLES} resamples, about 1-2 minutes) and random "
+                    f"restarts ({RESTART_SAMPLES} refits from randomised starts, several minutes). Every "
                     "refit stops with the same convergence test as the fit. "
                     "Gives the final ± on integrals and positions: "
                     "the largest of bootstrap, Laplace and restarts.",

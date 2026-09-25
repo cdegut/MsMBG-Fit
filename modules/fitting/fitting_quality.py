@@ -37,6 +37,12 @@ from threading import Lock
 # Bootstrap refits start from the fitted solution and settle quickly.
 CONVERGENCE_WINDOW = 50
 BOOTSTRAP_CONVERGENCE_WINDOW = 10
+# Refits keep going for this fraction of their iterations once R² reached the threshold.
+# Restarts start far from the optimum: they cross the threshold well before it
+R2_EXTRA_FRACTION = 0.1
+RESTART_R2_EXTRA_FRACTION = 0.5
+# Iterations over which the tangent of the R² evolution is measured
+R2_FLAT_WINDOW = 20
 
 
 @dataclass
@@ -277,11 +283,15 @@ def advanced_statistical_analysis(
     wRMSE_threshold: float = 100.0,
     theta_threshold: float = 1e-4,
     r2_threshold: Optional[float] = None,
+    r2_flat_threshold: float = 0.0,
+    min_iterations: int = 0,
+    accept_only_improving: bool = False,
 ) -> dict | Literal[False]:
     """
     Perform advanced statistical analysis using bootstrap and random start methods.
-    Refits stop like the main fit: parameters stable (theta_threshold), or
-    R² above r2_threshold.
+    Refits stop like the main fit: parameters stable (theta_threshold),
+    R² above r2_threshold, or R² evolution flat (r2_flat_threshold), but not
+    before min_iterations.
     """
 
     # Compute fitted values and residuals
@@ -415,6 +425,9 @@ def advanced_statistical_analysis(
                 )
 
             task.r2_threshold = r2_threshold
+            task.r2_flat_threshold = r2_flat_threshold
+            task.min_iterations = min(min_iterations, micro_iteration)
+            task.accept_only_improving = accept_only_improving
             task_pool.append(task)
 
         stop_event = multiprocessing.Event()
@@ -550,6 +563,10 @@ class QuickFitInterface:
     it_index: int
     convergence_window: int = CONVERGENCE_WINDOW
     r2_threshold: Optional[float] = None  # stop when R² is above it, as the main fit
+    r2_flat_threshold: float = 0.0  # stop when the R² evolution is flat, as the main fit
+    r2_extra_fraction: float = R2_EXTRA_FRACTION  # extra iterations once R² reached
+    min_iterations: int = 0  # no stopping criterion applies before this
+    accept_only_improving: bool = False  # refiner keeps only steps lowering the residual
 
 
 def execute_quick_fit(task: QuickFitInterface):
@@ -566,6 +583,10 @@ def execute_quick_fit(task: QuickFitInterface):
         task.it_index,
         task.convergence_window,
         task.r2_threshold,
+        task.r2_flat_threshold,
+        task.r2_extra_fraction,
+        task.min_iterations,
+        task.accept_only_improving,
     )
 
 
@@ -582,6 +603,10 @@ def quick_fit_model(
     it_index: int = 0,
     convergence_window: int = CONVERGENCE_WINDOW,
     r2_threshold: Optional[float] = None,
+    r2_flat_threshold: float = 0.0,
+    r2_extra_fraction: float = R2_EXTRA_FRACTION,
+    min_iterations: int = 0,
+    accept_only_improving: bool = False,
 ) -> tuple[Dict[int, peak_params], bool, int]:
     iteration = 0
     try:
@@ -598,6 +623,7 @@ def quick_fit_model(
             )
 
         widths = (-1, -1, -1, -1)
+        r2_stop_at: Optional[int] = None  # last iteration once R² reached the threshold
         quality_metrics: Optional[FitQualityMetricsReduced] = None
         # theta_threshold: largest allowed move per window, in Laplace error bars
         monitor = ConvergenceMonitor(
@@ -608,6 +634,7 @@ def quick_fit_model(
             threshold=theta_threshold,
             window=convergence_window,
         )
+        flatness = R2FlatnessMonitor(r2_flat_threshold)
         for iteration in range(n_iterations):
             if _worker_stop_event is not None and _worker_stop_event.is_set():
                 return {}, False, iteration
@@ -629,6 +656,7 @@ def quick_fit_model(
                     original_peak_width=spectrum.peaks[peak].width,
                     force_gaussian=False,
                     widths=widths,
+                    accept_only_improving=accept_only_improving,
                 )
 
             quality_metrics = calculate_fit_quality_metrics(
@@ -639,8 +667,21 @@ def quick_fit_model(
                 rmse_only=True,
             )
 
-            # Same stopping rule as the main fit: R² above the threshold
-            if r2_threshold is not None and quality_metrics.r_squared > r2_threshold:
+            # The criteria are tracked from the start, but none can end the refit
+            # before min_iterations (it must first respond to its own data)
+            may_stop = iteration + 1 >= min_iterations
+
+            # Same stopping rule as the main fit: R² above the threshold, then
+            # r2_extra_fraction more iterations so that the refit moves towards
+            # the optimum instead of stopping on the threshold boundary
+            if r2_stop_at is None and r2_threshold is not None and quality_metrics.r_squared > r2_threshold:
+                converged = True
+                r2_stop_at = iteration + max(1, int(np.ceil(r2_extra_fraction * (iteration + 1))))
+            if may_stop and r2_stop_at is not None and iteration >= r2_stop_at:
+                break
+
+            # R² no longer improving: more iterations would not change the fit
+            if flatness.update(quality_metrics.r_squared) and may_stop:
                 converged = True
                 break
 
@@ -655,12 +696,15 @@ def quick_fit_model(
                     theta_converged = monitor.converged
 
                 if check_convergence == "both":
-                    converged = bool(rmse_converged and theta_converged)
+                    criterion_met = bool(rmse_converged and theta_converged)
                 elif check_convergence == "wRMSE":
-                    converged = rmse_converged
-                elif check_convergence == "theta-gradient":
-                    converged = bool(theta_converged)
-                if converged:
+                    criterion_met = rmse_converged
+                else:
+                    criterion_met = bool(theta_converged)
+                # During the iterations after R² was reached, a refit that is not
+                # yet stable stays converged (R²) and simply runs on
+                if criterion_met and may_stop:
+                    converged = True
                     break
 
         if check_convergence and not converged:
@@ -814,24 +858,51 @@ def _make_initial_refit_task(
     noise_scale_A = 0.2
     noise_scale_X0 = 0.1
     noise_scale_w = 0.2  # this is the critical value
+    max_z = 2.5  # draws are capped so that rare extreme starts do not dominate the spread
+    neighbour_gap_fraction = 0.4  # an apex moves at most this fraction of the gap to a neighbour
 
     task_data_y = data_y.copy()
     task_spectrum = deepcopy(spectrum)
 
+    def z():
+        return float(np.clip(np.random.randn(), -max_z, max_z))
+
+    # Apex bounds keep the peaks in order: a swap of two close peaks would mix
+    # their integrals in the spread
+    by_position = sorted(working_peak_list, key=lambda p: spectrum.peaks[p].x0_init)
+    positions = [spectrum.peaks[p].x0_init for p in by_position]
+    x0_bounds = {}
+    for i, peak in enumerate(by_position):
+        low = (
+            positions[i] - neighbour_gap_fraction * (positions[i] - positions[i - 1])
+            if i > 0
+            else -np.inf
+        )
+        high = (
+            positions[i] + neighbour_gap_fraction * (positions[i + 1] - positions[i])
+            if i < len(positions) - 1
+            else np.inf
+        )
+        x0_bounds[peak] = (low, high)
+
     for peak in working_peak_list:
-        search_width = spectrum.peaks[peak].sigma_L + spectrum.peaks[peak].sigma_R
+        p = spectrum.peaks[peak]
+        # Same reference as the other parameters: the starting widths
+        search_width = p.sigma_L_init + p.sigma_R_init
         noise_scale_X0_applied = (
-            noise_scale_X0 if peak < 500 else noise_scale_X0 * 2.0
+            noise_scale_X0 * 2.0 if p.user_added else noise_scale_X0
         )  # be harder on user added peaks
+        # Log-normal jitter: symmetric in ratio (x0.6 as likely as x1.6) and positive
         working_peaks[peak] = peak_params(
-            A_refined=spectrum.peaks[peak].A_init
-            * (1 + np.random.randn() * noise_scale_A),
-            x0_refined=spectrum.peaks[peak].x0_init
-            + (np.random.randn() * search_width * noise_scale_X0_applied),
-            sigma_L=spectrum.peaks[peak].sigma_L_init
-            * (1 + np.random.randn() * noise_scale_w),
-            sigma_R=spectrum.peaks[peak].sigma_R_init
-            * (1 + np.random.randn() * noise_scale_w),
+            A_refined=p.A_init * np.exp(z() * noise_scale_A),
+            x0_refined=float(
+                np.clip(
+                    p.x0_init + z() * search_width * noise_scale_X0_applied,
+                    *x0_bounds[peak],
+                )
+            ),
+            sigma_L=p.sigma_L_init * np.exp(z() * noise_scale_w),
+            sigma_R=p.sigma_R_init * np.exp(z() * noise_scale_w),
         )
     task = QuickFitInterface(
         spectrum=task_spectrum,
@@ -844,6 +915,7 @@ def _make_initial_refit_task(
         wRMSE_threshold=wRMSE_threshold,
         width_regularization=True,
         it_index=b,
+        r2_extra_fraction=RESTART_R2_EXTRA_FRACTION,
     )
 
     return task
@@ -965,6 +1037,38 @@ class ConvergenceMonitor:
         self.last_move = float(np.nanmax(moves)) if moves.size else 0.0
         self.converged = self.last_move < self.threshold
         return True
+
+
+class R2FlatnessMonitor:
+    """
+    The fit is converged when the R² evolution has become flat.
+
+    - The tangent is the least squares slope of log(1 - R²) over the last `window`
+      iterations: it averages out the iteration-to-iteration jitter of the refiner.
+    - It is relative to the part of the data still unexplained, so the same setting
+      works at R² = 0.95 and R² = 0.999 (the slope of R² itself shrinks with 1 - R²).
+    - `last_gain` is the fraction by which the residual shrinks over one window at
+      the current slope; converged when it is below `threshold`. A residual that
+      grows (negative gain) also counts as flat: iterating does not help.
+    - threshold <= 0 disables the criterion.
+    """
+
+    def __init__(self, threshold: float, window: int = R2_FLAT_WINDOW):
+        self.threshold, self.window = threshold, window
+        self.history: list[float] = []
+        self.last_gain = float("nan")
+        self.converged = False
+
+    def update(self, r_squared: float) -> bool:
+        """Call once per iteration; True when the R² curve is flat."""
+        self.history.append(float(np.log(max(1.0 - r_squared, 1e-300))))
+        self.history = self.history[-self.window :]
+        if len(self.history) < self.window:
+            return False
+        slope = np.polyfit(np.arange(self.window), self.history, 1)[0]
+        self.last_gain = float(1.0 - np.exp(slope * self.window))
+        self.converged = self.threshold > 0 and self.last_gain < self.threshold
+        return self.converged
 
 
 def laplace_covariance_analysis(step=1e-4, rcond=1e-10) -> dict[int, dict]:

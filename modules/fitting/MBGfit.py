@@ -14,6 +14,7 @@ from modules.fitting.fitting_quality import (
     calculate_fit_quality_metrics,
     CONVERGENCE_WINDOW,
     ConvergenceMonitor,
+    R2FlatnessMonitor,
     laplace_covariance_analysis,
 )
 from modules.math import combine_errors
@@ -208,6 +209,8 @@ def refine_peak_parameters(
     current_metric = 0.0
     r_squared = 0.0
     r_squared_convergence = dpg.get_value("fitting_r2")
+    flatness = R2FlatnessMonitor(r2_flat_threshold())
+    accept_only_improving = bool(dpg.get_value("accept_only_improving"))
     stop_reason = "max_iter"  # overwritten if another criterion ends the loop
     for k in range(iterations + 1):
 
@@ -263,18 +266,28 @@ def refine_peak_parameters(
                 if np.isfinite(delta_theta)
                 else "measuring..."
             )
+            + (
+                f", R² gain: {100 * flatness.last_gain:.3g} % / {flatness.window} it."
+                if np.isfinite(flatness.last_gain)
+                else ""
+            )
             + f", iteration time: {time.time() - iteration_start:.2f}s",
         )
         alpha_convergence = 0.95
         # Check convergence using multiple criteria
         r2_converged = r_squared > r_squared_convergence
-        if theta_converged or r2_converged:
-            if theta_converged and r2_converged:
-                stop_reason = "theta+r2"
-            elif theta_converged:
-                stop_reason = "theta"
-            else:
-                stop_reason = "r2"
+        flat_converged = flatness.update(r_squared)
+        criteria_met = [
+            name
+            for name, met in (
+                ("theta", theta_converged),
+                ("r2", r2_converged),
+                ("flat", flat_converged),
+            )
+            if met
+        ]
+        if criteria_met:
+            stop_reason = "+".join(criteria_met)
             break
 
         if oscillation_detected:
@@ -306,6 +319,7 @@ def refine_peak_parameters(
                 force_gaussian=use_gaussian,
                 widths=widths,
                 alpha=alpha_convergence,
+                accept_only_improving=accept_only_improving,
             )
 
     ##############################
@@ -344,6 +358,8 @@ def refine_peak_parameters(
         bic=float(full_quality_metrics.bic),
         residual_autocorr=float(full_quality_metrics.residual_autocorr),
         time_taken=time_taken,
+        r2_flat_gain=flatness.last_gain,
+        r2_flat_threshold=flatness.threshold,
     )
     render_callback.fit_summary = fit_summary
     log(
@@ -367,20 +383,37 @@ def refine_peak_parameters(
     return True
 
 
+CRITERION_TEXT = {
+    "theta": "parameters stable",
+    "r2": "R² above threshold",
+    "flat": "R² no longer improving",
+}
+
+
+def r2_flat_threshold() -> float:
+    """R² flatness setting of the UI, as a fraction (the UI shows %)."""
+    return dpg.get_value("fitting_r2_flat") / 100.0
+
+
 def stop_reason_text(fit_summary: FitSummary) -> str:
-    return {
-        "max_iter": "Not converged: iteration limit reached",
-        "theta": "Converged: parameters stable",
-        "r2": "Converged: R² above threshold",
-        "theta+r2": "Converged: parameters stable and R² above threshold",
-        "user": "Stopped by user",
-    }.get(fit_summary.stop_reason, fit_summary.stop_reason)
+    reason = fit_summary.stop_reason
+    if reason == "max_iter":
+        return "Not converged: iteration limit reached"
+    if reason == "user":
+        return "Stopped by user"
+    return "Converged: " + " and ".join(
+        CRITERION_TEXT.get(name, name) for name in reason.split("+")
+    )
 
 
 # Error analysis: number of refits, and iteration cap of a bootstrap refit (it
 # starts from the fitted solution); a restart refit is capped like the main fit
-BOOTSTRAP_SAMPLES = 128
+BOOTSTRAP_SAMPLES = 512
 BOOTSTRAP_MAX_ITERATIONS = 500
+# A bootstrap refit starts at the solution and can meet the stop criteria at once:
+# it runs at least this, or this fraction of the main fit's iterations if larger
+BOOTSTRAP_MIN_ITERATIONS = 10
+BOOTSTRAP_MIN_FRACTION = 0.1
 RESTART_SAMPLES = 16  # one round of refits on a 16-core machine
 
 
@@ -429,6 +462,21 @@ def run_advanced_statistical_analysis():
             if spectrum.fit_summary is not None
             else dpg.get_value("fitting_r2")
         ),
+        r2_flat_threshold=r2_flat_threshold(),
+        accept_only_improving=bool(dpg.get_value("accept_only_improving")),
+        min_iterations=max(
+            BOOTSTRAP_MIN_ITERATIONS,
+            int(
+                np.ceil(
+                    BOOTSTRAP_MIN_FRACTION
+                    * (
+                        spectrum.fit_summary.iterations_done
+                        if spectrum.fit_summary is not None
+                        else 0
+                    )
+                )
+            ),
+        ),
     )
 
     if error_bootstrap is False:
@@ -450,6 +498,8 @@ def run_advanced_statistical_analysis():
             if spectrum.fit_summary is not None
             else dpg.get_value("fitting_r2")
         ),
+        r2_flat_threshold=r2_flat_threshold(),
+        accept_only_improving=bool(dpg.get_value("accept_only_improving")),
         method="initial",
     )
     if errors_random_start is False and dpg.get_value("stop_fitting_button"):

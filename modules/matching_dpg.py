@@ -80,7 +80,7 @@ def matching_window(render_callback: RenderCallback):
                 )
                 dpg.add_checkbox(
                     label="Hide High error",
-                    default_value=False,
+                    default_value=True,
                     tag="hide_high_error",
                     callback=redraw_blocks,
                     user_data=render_callback,

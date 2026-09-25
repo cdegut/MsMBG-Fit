@@ -299,6 +299,8 @@ def refine_peak_parameters(
         #     alpha_convergence = 0.7
         # elif k < 100:
         #     alpha_convergence = 0.5
+        if flatness.last_gain < 0:
+            accept_only_improving = True
 
         if len(metric_history) >= 5 and oscillation_detected:
             recent = metric_history[-5:]

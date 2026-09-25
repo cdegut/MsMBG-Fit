@@ -24,7 +24,7 @@ MsMBG-Fit is a Python application designed for analyzing mass spectrometry data 
 
 ### Requirements
 
--   Python 3.13 (3.14 not supported yet by dearpygui)
+-   Python 3.13 (3.14 not supported yet by dearpygui). You do not need to install it yourself: uv downloads it automatically.
 -   Required packages:
     -   dearpygui
     -   numpy
@@ -36,26 +36,110 @@ MsMBG-Fit is a Python application designed for analyzing mass spectrometry data 
     -   matplotlib
     -   seaborn
 
+### Quick start (launcher scripts)
+
+Download the code (see [Get the code](#2-get-the-code)), then use the launcher for your system. On first launch it installs uv if needed, downloads Python 3.13 and the dependencies, then starts the application. Every launch also runs `git pull` to update to the latest version when the code was cloned with git. If you're offline or have local changes, the update is skipped and the current version starts.
+
+| System  | Double-click          | Or from a terminal in the project folder |
+| ------- | --------------------- | ---------------------------------------- |
+| Windows | `run.bat`             | `.\run.bat`                              |
+| macOS   | `run.command`         | `sh run.sh`                              |
+| Linux   | —                     | `sh run.sh`                              |
+
+-   **macOS**: if Finder refuses to open `run.command` because it is from an "unidentified developer", right-click it and choose **Open**. If it says you do not have permission, run `chmod +x run.command run.sh` once in a terminal.
+-   **Windows**: if SmartScreen shows "Windows protected your PC", click **More info → Run anyway**.
+
+If you'd rather install things yourself, follow the manual steps below.
+
 ### Setup with uv
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if it is not already available, then run:
+The recommended way to run MsMBG-Fit is with [uv](https://docs.astral.sh/uv/). uv is a fast Python package manager that installs the correct Python version and the exact dependency versions recorded in `uv.lock`, in an environment kept separate from the rest of your system.
+
+#### 1. Install uv
+
+**Windows** (PowerShell):
+
+```powershell
+winget install --id=astral-sh.uv -e
+```
+
+or, without winget:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**macOS**:
 
 ```shell
-# Clone the repository
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+or, with Homebrew:
+
+```shell
+brew install uv
+```
+
+**Linux**:
+
+```shell
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+(If `curl` is not available, use `wget -qO- https://astral.sh/uv/install.sh | sh`.)
+
+After installing, **close and reopen your terminal**, then check that uv works:
+
+```shell
+uv --version
+```
+
+#### 2. Get the code
+
+With git:
+
+```shell
 git clone https://github.com/cdegut/MsMBG-Fit.git
 cd MsMBG-Fit
+```
 
-# Create the Python 3.13 environment and install the locked dependencies
+Without git: on the GitHub page, click **Code → Download ZIP**, extract it, and open a terminal in the extracted folder.
+
+#### 3. Install the dependencies
+
+From inside the project folder:
+
+```shell
 uv sync
 ```
+
+This creates a `.venv` folder containing Python 3.13 and all the required packages. You only need to do this once, and again after updating the code.
+
+#### Troubleshooting
+
+-   **`uv` is not recognized / `command not found`**: your terminal hasn't picked up the updated PATH yet. Close and reopen it. In VS Code, close the whole application and reopen it, because a new terminal tab isn't enough. On Windows you can also reload the PATH in the current PowerShell window:
+
+    ```powershell
+    $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
+    ```
+
+    On macOS/Linux, run `source $HOME/.local/bin/env` (or open a new terminal).
+
+-   **Linux: the window does not open / OpenGL errors**: DearPyGUI needs OpenGL drivers and a graphical session. On Debian/Ubuntu, `sudo apt install libgl1 libglib2.0-0` usually fixes this.
+-   **Windows: "running scripts is disabled on this system"**: this only happens if you activate `.venv` manually. Use `uv run` instead (see below), which does not need activation.
 
 ## Usage
 
 ### Starting the Application
 
+From the project folder, on any operating system:
+
 ```shell
 uv run python main.py
 ```
+
+`uv run` automatically uses the project environment, so there is no need to activate `.venv` first. If the dependencies have changed, it syncs them before starting.
 
 ### Workflow
 

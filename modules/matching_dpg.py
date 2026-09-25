@@ -79,9 +79,9 @@ def matching_window(render_callback: RenderCallback):
                     width=100,
                 )
                 dpg.add_checkbox(
-                    label="Hide High error",
+                    label="Hide bad peaks",
                     default_value=True,
-                    tag="hide_high_error",
+                    tag="hide_bad_peaks",
                     callback=redraw_blocks,
                     user_data=render_callback,
                 )

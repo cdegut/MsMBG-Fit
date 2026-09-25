@@ -128,6 +128,7 @@ def MBG_fit(
         spectrum.peaks[peak].se_x0_restart = -1.0
         spectrum.peaks[peak].regression_fct = (0.0, 0.0)
         spectrum.peaks[peak].fit_quality = FitQualityPeakMetrics(0.0, 0.0, 1.0, 0.0)
+        spectrum.peaks[peak].marked_bad = None  # automatic again: from the new fit's error
         spectrum.peaks[peak].integral = 0.0
         spectrum.peaks[peak].fitted = False
         spectrum.peaks[peak].laplace_se_integral = -1.0

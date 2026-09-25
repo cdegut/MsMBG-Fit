@@ -310,6 +310,9 @@ class FitQualityPeakMetrics:
     peak_rmse: float
     relative_error: float
     r_squared: float
+    # Mean squared residual over the peak's region / noise variance: ~1 = fitted to
+    # within the noise; NaN when not computed (older files)
+    residual_noise: float = float("nan")
 
 
 @dataclass
@@ -341,6 +344,10 @@ class MatchedWith:
     charge: int
     mw: float
     ratio: float
+
+
+# Relative error above which a peak counts as bad unless the user decided otherwise
+HIGH_ERROR_THRESHOLD = 0.15
 
 
 @dataclass
@@ -375,6 +382,17 @@ class peak_params:
     fit_quality: FitQualityPeakMetrics = field(
         default_factory=lambda: FitQualityPeakMetrics(0.0, 0.0, 1.0, 0.0)
     )
+    # Bad peak (hidden from matching when 'Hide bad peaks' is on): None = automatic
+    # (relative error above HIGH_ERROR_THRESHOLD), True / False = set by the user.
+    # Reset to automatic by a new fit
+    marked_bad: Optional[bool] = None
+
+    @property
+    def is_bad(self) -> bool:
+        # bool(): the error is often a numpy float, and dearpygui rejects numpy bools
+        if self.marked_bad is not None:
+            return bool(self.marked_bad)
+        return bool(self.fit_quality.relative_error > HIGH_ERROR_THRESHOLD)
     # Components of se_integral / se_x0 from the error analysis, -1 when not computed.
     # se_integral = max(bootstrap, Laplace, restarts)
     se_integral_bootstrap: float = -1.0
@@ -406,6 +424,7 @@ def upgrade_peak_params(old: peak_params) -> peak_params:
         peak_rmse=quality.get("peak_rmse", 0.0),
         relative_error=quality.get("relative_error", 1.0),
         r_squared=quality.get("r_squared", 0.0),
+        residual_noise=quality.get("residual_noise", float("nan")),
     )
     return peak
 

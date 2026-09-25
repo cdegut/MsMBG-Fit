@@ -1,5 +1,19 @@
 import dearpygui.dearpygui as dpg
 
+# Good / bad colours, shared by the status texts and the peak labels
+GOOD_COLOR = (20, 130, 60)
+BAD_COLOR = (200, 30, 30)
+
+
+def peak_label_color(is_bad: bool) -> tuple[int, int, int]:
+    """Colour of a peak's label (plots): red for a peak marked bad, green otherwise."""
+    return BAD_COLOR if is_bad else GOOD_COLOR
+
+
+def peak_label_theme(is_bad: bool) -> str:
+    """Text theme of a peak's label (tables), same colours as peak_label_color."""
+    return "text_bad_theme" if is_bad else "text_good_theme"
+
 
 def create_styles():
     with dpg.theme(tag="general_theme"):
@@ -74,9 +88,9 @@ def create_styles():
 
     # Status text colours (readable on the light background)
     for name, color in (
-        ("text_good_theme", (20, 130, 60)),
+        ("text_good_theme", GOOD_COLOR),
         ("text_warn_theme", (200, 110, 0)),
-        ("text_bad_theme", (200, 30, 30)),
+        ("text_bad_theme", BAD_COLOR),
         ("text_muted_theme", (130, 130, 130)),
     ):
         with dpg.theme(tag=name):

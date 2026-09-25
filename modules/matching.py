@@ -7,6 +7,7 @@ import numpy as np
 from modules.rendercallback import RenderCallback, get_global_render_callback_ref
 from modules.math import bi_gaussian, bi_Lorentzian
 from modules.var import colors_list
+from modules.dpg_style import peak_label_color
 from modules.data_structures import MSData, MatchedWith, get_global_msdata_ref
 
 
@@ -71,6 +72,11 @@ def update_theorical_peak_table(k: int, mz_list: List[float], z_list):
                     pass
 
 
+def hidden_in_matching(spectrum: MSData, peak: int) -> bool:
+    """Peaks ticked 'Bad' in the peak table are left out of matching when asked."""
+    return bool(dpg.get_value("hide_bad_peaks")) and spectrum.peaks[peak].is_bad
+
+
 def redraw_blocks():
     render_callback = get_global_render_callback_ref()
     show_matched_peaks(render_callback, clear=True)
@@ -95,12 +101,11 @@ def redraw_blocks():
             dpg.delete_item(alias)
 
     for peak in spectrum.peaks:
-        if not spectrum.peaks[peak].fitted:
+        # Reset before skipping: a hidden peak must not keep an old match (the
+        # integral ratios and the matched peak plots read matched_with)
+        spectrum.peaks[peak].matched_with = []
+        if not spectrum.peaks[peak].fitted or hidden_in_matching(spectrum, peak):
             continue
-        if dpg.get_value("hide_high_error"):
-            if spectrum.peaks[peak].fit_quality.relative_error > 0.15:
-                continue
-        spectrum.peaks[peak].matched_with = []  # Reset matched_with for all peaks
 
         if spectrum.peaks[peak].regression_fct[0] == 0:
             regression_0 = 0
@@ -128,7 +133,7 @@ def redraw_blocks():
             label=f"Peak {peak}",
             default_value=(regression_0, 0),
             offset=(15, 15),
-            color=(100, 100, 100),
+            color=peak_label_color(spectrum.peaks[peak].is_bad),
             clamped=False,
             parent="peak_matching_plot",
             tag=f"peak_annotation_matching_{peak}_gray",
@@ -254,11 +259,8 @@ def calculate_quality_score(
 
     for z_mz in mz_lines:
         for peak in spectrum.peaks:
-            if not spectrum.peaks[peak].fitted:
+            if not spectrum.peaks[peak].fitted or hidden_in_matching(spectrum, peak):
                 continue
-            if dpg.get_value("hide_high_error"):
-                if spectrum.peaks[peak].fit_quality.relative_error > 0.15:
-                    continue
 
             integrals.append(spectrum.peaks[peak].integral)
             try:
@@ -308,14 +310,8 @@ def series_integral_quality(k: int):
 
     for z_mz in mz_lines:
         for peak in spectrum.peaks:
-            if not spectrum.peaks[peak].fitted:
+            if not spectrum.peaks[peak].fitted or hidden_in_matching(spectrum, peak):
                 continue
-            if dpg.get_value("hide_high_error"):
-                if spectrum.peaks[peak].fit_quality.relative_error > 0.15:
-                    continue
-
-                if spectrum.peaks[peak].matched_with == []:
-                    continue
             matched = spectrum.peaks[peak].matched_with
             for m in matched:
                 if m.set == k and m.charge == z_mz[0]:
@@ -333,11 +329,8 @@ def analyze_series(k: int):
 
     for z_mz in mz_lines:
         for peak in spectrum.peaks:
-            if not spectrum.peaks[peak].fitted:
+            if not spectrum.peaks[peak].fitted or hidden_in_matching(spectrum, peak):
                 continue
-            if dpg.get_value("hide_high_error"):
-                if spectrum.peaks[peak].fit_quality.relative_error > 0.15:
-                    continue
 
             matched = spectrum.peaks[peak].matched_with
             for m in matched:

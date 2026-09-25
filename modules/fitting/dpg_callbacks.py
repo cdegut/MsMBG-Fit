@@ -4,8 +4,10 @@ from sklearn import base
 from modules.fitting.MBGfit import MBG_fit, run_advanced_statistical_analysis
 from modules.fitting.draw_MBG import show_MBG
 from modules.matching import redraw_blocks
+from modules.dpg_style import peak_label_color, peak_label_theme
 from modules.rendercallback import RenderCallback
 from modules.data_structures import (
+    HIGH_ERROR_THRESHOLD,
     FitSummary,
     MSData,
     get_global_msdata_ref,
@@ -22,9 +24,15 @@ from modules.fitting.fitting_quality import (
     CONVERGENCE_WINDOW,
     R2_FLAT_WINDOW,
     laplace_covariance_analysis,
+    residual_noise_ratio,
+    residual_noise_sigma,
 )
 from modules.rendercallback import get_global_render_callback_ref
 import seaborn as sns
+
+# Residual / noise over a peak region: ~1 is noise-level; warn / flag above these
+RESIDUAL_NOISE_WARN = 1.5
+RESIDUAL_NOISE_BAD = 2.0
 
 # Fitted peaks are coloured by relative error, from 0 to ERROR_COLOR_MAX
 PEAK_COLORS = sns.color_palette("plasma", 20)
@@ -33,6 +41,8 @@ ERROR_COLOR_MAX = 1 / 3
 # (header, sort key, width weight) ; sort key None = not sortable
 PEAK_TABLE_COLUMNS = [
     ("", None, 0.15),
+    # Before "Peak": that column's selectable spans the row and would take the clicks
+    ("Bad", "bad", 0.25),
     ("Peak", "peak", 0.5),
     ("Apex m/z", "apex", 0.9),
     ("Start m/z", "start", 0.9),
@@ -41,7 +51,7 @@ PEAK_TABLE_COLUMNS = [
     ("Integral", "integral", 0.9),
     ("Share %", "share", 0.6),
     ("Rel. error", "rel_error", 0.6),
-    ("R²", "r2", 0.6),
+    ("Resid./noise", "residual_noise", 0.6),
     ("SNR", "snr", 0.5),
     ("Area corr. L / R", "area_corr", 1.1),
     ("Flags", None, 1.75),
@@ -395,7 +405,7 @@ def draw_fitted_peaks(delete=False):
             label=f"Peak {peak}",
             default_value=(x0_fit, A),
             offset=(-15, -15),
-            color=[120, 120, 120],
+            color=peak_label_color(spectrum.peaks[peak].is_bad),
             clamped=False,
             parent="gaussian_fit_plot",
             tag=f"peak_annotation_{peak}",
@@ -411,12 +421,22 @@ def peak_flags(spectrum: MSData, peak: int) -> list[tuple[str, str]]:
     p = spectrum.peaks[peak]
     q = p.fit_quality
     flags = []
-    if q.relative_error > 0.15:
+    if q.relative_error > HIGH_ERROR_THRESHOLD:
         flags.append(
-            ("high error", "Relative error > 0.15: hidden in matching when 'hide high error' is on")
+            (
+                "high error",
+                f"Relative error > {HIGH_ERROR_THRESHOLD:g}: ticked 'Bad' by default "
+                "(hidden in matching when 'Hide bad peaks' is on)",
+            )
         )
-    if q.r_squared < 0.85:
-        flags.append(("low R²", f"Local R² = {q.r_squared:.3f} (< 0.85)"))
+    if q.residual_noise > RESIDUAL_NOISE_BAD:
+        flags.append(
+            (
+                "local misfit",
+                f"Residual over the peak region = {q.residual_noise:.1f}x the noise variance "
+                f"(> {RESIDUAL_NOISE_BAD:g}): the model does not follow the data here",
+            )
+        )
     if q.snr < 3:
         flags.append(("low SNR", f"Peak height / local residual noise = {q.snr:.1f} (< 3)"))
     if p.sampling_rate > 0 and min(p.sigma_L, p.sigma_R) < p.sampling_rate * 4:
@@ -560,6 +580,22 @@ def error_breakdown(total: float, bootstrap: float, laplace: float, restart: flo
     )
 
 
+def fill_residual_noise(spectrum: MSData, peaks: list[int]):
+    """Compute the residual / noise ratio of peaks fitted before it existed (older files)."""
+    missing = [p for p in peaks if not np.isfinite(spectrum.peaks[p].fit_quality.residual_noise)]
+    data = spectrum.baseline_corrected
+    if not missing or data is None or len(data) < 3:
+        return
+    x, y = data[:, 0], data[:, 1]
+    residual = y - spectrum.calculate_mbg(x, fitting=True)
+    noise_sigma = residual_noise_sigma(residual)
+    for peak in missing:
+        p = spectrum.peaks[peak]
+        p.fit_quality.residual_noise = residual_noise_ratio(
+            x, residual, p.x0_refined, p.sigma_L, p.sigma_R, noise_sigma
+        )
+
+
 def update_peak_table(spectrum: MSData):
     update_fit_summary()
     update_error_analysis_status(spectrum)
@@ -575,6 +611,7 @@ def update_peak_table(spectrum: MSData):
         else:
             p.integral = bi_gaussian_integral(p.A_refined, p.sigma_L, p.sigma_R)
     total_integral = sum(spectrum.peaks[peak].integral for peak in fitted_peaks)
+    fill_residual_noise(spectrum, fitted_peaks)
 
     for peak in fitted_peaks:
         p = spectrum.peaks[peak]
@@ -588,6 +625,7 @@ def update_peak_table(spectrum: MSData):
         flags = peak_flags(spectrum, peak)
 
         sort_values = {
+            "bad": int(p.is_bad),
             "peak": peak,
             "apex": p.x0_refined,
             "start": regression_0,
@@ -596,7 +634,7 @@ def update_peak_table(spectrum: MSData):
             "integral": p.integral,
             "share": share,
             "rel_error": q.relative_error,
-            "r2": q.r_squared,
+            "residual_noise": q.residual_noise if np.isfinite(q.residual_noise) else -1.0,
             "snr": q.snr if np.isfinite(q.snr) else 1e12,
             "area_corr": p.laplace_area_corr,
         }
@@ -613,12 +651,27 @@ def update_peak_table(spectrum: MSData):
                 callback=zoom_to_peak,
                 user_data=peak,
             )
-            dpg.add_selectable(
+            with dpg.group():
+                bad_box = dpg.add_checkbox(
+                    default_value=p.is_bad,
+                    callback=mark_peak_bad,
+                    user_data=peak,
+                )
+                with dpg.tooltip(bad_box):
+                    dpg.add_text(
+                        "Bad peak: hidden in matching (series assignment, integral ratios) "
+                        "when 'Hide bad peaks' is on. Ticked by default when the relative "
+                        f"error is above {HIGH_ERROR_THRESHOLD:g}; your choice is kept until "
+                        "the next fit.",
+                        wrap=400,
+                    )
+            name = dpg.add_selectable(
                 label=f"Peak {peak}",
                 span_columns=True,
                 callback=zoom_to_peak,
                 user_data=peak,
             )
+            dpg.bind_item_theme(name, peak_label_theme(p.is_bad))
             add_themed_text(
                 with_se(p.x0_refined, p.se_x0),
                 tooltip=(
@@ -656,7 +709,22 @@ def update_peak_table(spectrum: MSData):
                 f"{q.relative_error:.4f}",
                 quality_theme(q.relative_error, 0.05, 0.15, higher_is_better=False),
             )
-            add_themed_text(f"{q.r_squared:.4f}", quality_theme(q.r_squared, 0.95, 0.85))
+            if np.isfinite(q.residual_noise):
+                add_themed_text(
+                    f"{q.residual_noise:.2f}",
+                    quality_theme(
+                        q.residual_noise,
+                        RESIDUAL_NOISE_WARN,
+                        RESIDUAL_NOISE_BAD,
+                        higher_is_better=False,
+                    ),
+                    "Mean squared residual over the peak region (apex - 3 sigma L to apex + 3 "
+                    "sigma R) / noise variance (MAD of the whole residual). ~1: fitted to within "
+                    f"the noise; above {RESIDUAL_NOISE_BAD:g}: local misfit (wrong shape, missing "
+                    "or extra peak). Overlap with neighbours does not lower it, unlike a local R².",
+                )
+            else:
+                add_themed_text("n/a", "text_muted_theme")
             add_themed_text(f"{q.snr:.1f}", quality_theme(q.snr, 10, 3))
             if p.laplace_se_integral >= 0:
                 sides = [
@@ -698,6 +766,27 @@ def sort_peak_table(sender, sort_specs):
     rows = dpg.get_item_children(sender, 1)
     rows.sort(key=lambda row: dpg.get_item_user_data(row)[key], reverse=direction < 0)
     dpg.reorder_items(sender, 1, rows)
+
+
+def mark_peak_bad(sender, app_data, user_data):
+    """'Bad' tick box of the peak table: the user's choice replaces the automatic one."""
+    spectrum = get_global_msdata_ref()
+    is_bad = bool(app_data)
+    spectrum.peaks[user_data].marked_bad = is_bad
+    # The row keeps its sort value and label colour up to date, the fitting plot
+    # label follows, and the matching plot is redrawn
+    cell = dpg.get_item_parent(sender)
+    row = dpg.get_item_parent(cell) if cell is not None else None
+    if row is not None:
+        values = dpg.get_item_user_data(row)
+        if isinstance(values, dict):
+            values["bad"] = int(is_bad)
+        for item in dpg.get_item_children(row, 1) or []:
+            if dpg.get_item_type(item) == "mvAppItemType::mvSelectable":
+                dpg.bind_item_theme(item, peak_label_theme(is_bad))
+    if dpg.does_item_exist(f"peak_annotation_{user_data}"):
+        dpg.configure_item(f"peak_annotation_{user_data}", color=peak_label_color(is_bad))
+    redraw_blocks()
 
 
 def zoom_to_peak(sender, app_data, user_data):

@@ -72,6 +72,24 @@ class FitQualityMetricsReduced:
     sigma_R_std: float = 0.0
 
 
+def residual_noise_ratio(data_x, residual, x0, sigma_L, sigma_R, noise_sigma) -> float:
+    """
+    Mean squared residual over the peak's region (x0 - 3 sigma_L to x0 + 3 sigma_R)
+    divided by the noise variance. ~1: fitted to within the noise; above ~2: local
+    misfit. Unlike a local R², it does not depend on how much the data varies in
+    the region, so it stays meaningful for peaks on the envelope of their neighbours.
+    """
+    region = (data_x >= x0 - 3 * sigma_L) & (data_x <= x0 + 3 * sigma_R)
+    if not np.any(region) or noise_sigma <= 0:
+        return float("nan")
+    return float(np.mean(np.square(residual[region])) / noise_sigma**2)
+
+
+def residual_noise_sigma(residual) -> float:
+    """Robust (MAD) noise estimate of the residual, as in the Laplace analysis."""
+    return float(1.4826 * np.median(np.abs(residual - np.median(residual))))
+
+
 @overload
 def calculate_fit_quality_metrics(
     data_x,
@@ -175,6 +193,7 @@ def calculate_fit_quality_metrics(
 
     # 4. Peak-specific metrics
     peak_quality = {}
+    noise_sigma = residual_noise_sigma(residual)
     for peak in working_peak_list:
         x0 = spectrum.peaks[peak].x0_refined
         sigma_L = spectrum.peaks[peak].sigma_L
@@ -204,6 +223,9 @@ def calculate_fit_quality_metrics(
                 peak_rmse=peak_rmse,
                 relative_error=(peak_rmse / peak_height if peak_height > 0 else np.inf),
                 r_squared=peak_r_squared,
+                residual_noise=residual_noise_ratio(
+                    data_x, residual, x0, sigma_L, sigma_R, noise_sigma
+                ),
             )
 
     # 5. Akaike Information Criterion (AIC)

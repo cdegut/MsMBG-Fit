@@ -42,7 +42,7 @@ ERROR_COLOR_MAX = 1 / 3
 PEAK_TABLE_COLUMNS = [
     ("", None, 0.15),
     # Before "Peak": that column's selectable spans the row and would take the clicks
-    ("Bad", "bad", 0.25),
+    ("Good", "good", 0.35),
     ("Peak", "peak", 0.5),
     ("Apex m/z", "apex", 0.9),
     ("Start m/z", "start", 0.9),
@@ -425,7 +425,7 @@ def peak_flags(spectrum: MSData, peak: int) -> list[tuple[str, str]]:
         flags.append(
             (
                 "high error",
-                f"Relative error > {HIGH_ERROR_THRESHOLD:g}: ticked 'Bad' by default "
+                f"Relative error > {HIGH_ERROR_THRESHOLD:g}: not ticked 'Good' by default "
                 "(hidden in matching when 'Hide bad peaks' is on)",
             )
         )
@@ -625,7 +625,7 @@ def update_peak_table(spectrum: MSData):
         flags = peak_flags(spectrum, peak)
 
         sort_values = {
-            "bad": int(p.is_bad),
+            "good": int(not p.is_bad),
             "peak": peak,
             "apex": p.x0_refined,
             "start": regression_0,
@@ -634,7 +634,9 @@ def update_peak_table(spectrum: MSData):
             "integral": p.integral,
             "share": share,
             "rel_error": q.relative_error,
-            "residual_noise": q.residual_noise if np.isfinite(q.residual_noise) else -1.0,
+            "residual_noise": (
+                q.residual_noise if np.isfinite(q.residual_noise) else -1.0
+            ),
             "snr": q.snr if np.isfinite(q.snr) else 1e12,
             "area_corr": p.laplace_area_corr,
         }
@@ -652,17 +654,17 @@ def update_peak_table(spectrum: MSData):
                 user_data=peak,
             )
             with dpg.group():
-                bad_box = dpg.add_checkbox(
-                    default_value=p.is_bad,
-                    callback=mark_peak_bad,
+                good_box = dpg.add_checkbox(
+                    default_value=not p.is_bad,
+                    callback=mark_peak_good,
                     user_data=peak,
                 )
-                with dpg.tooltip(bad_box):
+                with dpg.tooltip(good_box):
                     dpg.add_text(
-                        "Bad peak: hidden in matching (series assignment, integral ratios) "
-                        "when 'Hide bad peaks' is on. Ticked by default when the relative "
-                        f"error is above {HIGH_ERROR_THRESHOLD:g}; your choice is kept until "
-                        "the next fit.",
+                        "Good peak: used in matching (series assignment, integral ratios). "
+                        "Unticked (bad) peaks are hidden there when 'Hide bad peaks' is on. "
+                        f"Unticked by default when the relative error is above "
+                        f"{HIGH_ERROR_THRESHOLD:g}; your choice is kept until the next fit.",
                         wrap=400,
                     )
             name = dpg.add_selectable(
@@ -768,10 +770,10 @@ def sort_peak_table(sender, sort_specs):
     dpg.reorder_items(sender, 1, rows)
 
 
-def mark_peak_bad(sender, app_data, user_data):
-    """'Bad' tick box of the peak table: the user's choice replaces the automatic one."""
+def mark_peak_good(sender, app_data, user_data):
+    """'Good' tick box of the peak table: the user's choice replaces the automatic one."""
     spectrum = get_global_msdata_ref()
-    is_bad = bool(app_data)
+    is_bad = not bool(app_data)
     spectrum.peaks[user_data].marked_bad = is_bad
     # The row keeps its sort value and label colour up to date, the fitting plot
     # label follows, and the matching plot is redrawn
@@ -780,7 +782,7 @@ def mark_peak_bad(sender, app_data, user_data):
     if row is not None:
         values = dpg.get_item_user_data(row)
         if isinstance(values, dict):
-            values["bad"] = int(is_bad)
+            values["good"] = int(not is_bad)
         for item in dpg.get_item_children(row, 1) or []:
             if dpg.get_item_type(item) == "mvAppItemType::mvSelectable":
                 dpg.bind_item_theme(item, peak_label_theme(is_bad))

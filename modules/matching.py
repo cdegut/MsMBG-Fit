@@ -73,7 +73,7 @@ def update_theorical_peak_table(k: int, mz_list: List[float], z_list):
 
 
 def hidden_in_matching(spectrum: MSData, peak: int) -> bool:
-    """Peaks ticked 'Bad' in the peak table are left out of matching when asked."""
+    """Peaks not ticked 'Good' in the peak table are left out of matching when asked."""
     return bool(dpg.get_value("hide_bad_peaks")) and spectrum.peaks[peak].is_bad
 
 

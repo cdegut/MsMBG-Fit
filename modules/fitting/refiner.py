@@ -58,6 +58,39 @@ ACCEPT_ONLY_IMPROVING = False
 BACKTRACK_STEPS = 3
 
 
+# Width regularisation (reduce width variance): a peak's asymmetry sigma_R / sigma_L
+# stays within this factor of the median asymmetry of all peaks (either way).
+# Relative to the data, so strongly asymmetric spectra keep their asymmetry; it only
+# stops a peak whose tail grows into unexplained signal (absent peak, shoulder),
+# which makes the other side collapse and the apex end above the data.
+# Hard limit: a soft one lets the tail creep past it a little every iteration.
+# 1 or less = no asymmetry limit.
+ASYMMETRY_SPREAD = 2.0
+
+
+def _median_log_asymmetry(spectrum) -> float:
+    ratios = [
+        np.log(q.sigma_R / q.sigma_L)
+        for q in spectrum.peaks.values()
+        if not q.do_not_fit and q.sigma_L > 0 and q.sigma_R > 0
+    ]
+    return float(np.median(ratios)) if ratios else 0.0
+
+
+def _limit_asymmetry(sigma_L, sigma_R, median_log_ratio, spread):
+    """Asymmetry brought within spread of the median, at constant sigma_L + sigma_R."""
+    if spread <= 1 or sigma_L <= 0 or sigma_R <= 0:
+        return sigma_L, sigma_R
+    log_ratio = np.log(sigma_R / sigma_L)
+    limit = np.log(spread)
+    clamped = float(np.clip(log_ratio, median_log_ratio - limit, median_log_ratio + limit))
+    if clamped == log_ratio:
+        return sigma_L, sigma_R
+    ratio = np.exp(clamped)
+    total = sigma_L + sigma_R
+    return total / (1 + ratio), total * ratio / (1 + ratio)
+
+
 def _accept_only_improving(spectrum, peak, previous, data_x, data_y):
     q = spectrum.peaks[peak]
     new = (q.A_refined, q.x0_refined, q.sigma_L, q.sigma_R, q.integral)
@@ -94,14 +127,16 @@ def refine_iteration(
     integral_gain=None,
     shape_gain=None,
     accept_only_improving=None,
+    asymmetry_spread=None,
 ):
     integral_gain = INTEGRAL_GAIN if integral_gain is None else integral_gain
     shape_gain = SHAPE_GAIN if shape_gain is None else shape_gain
-    # Passed explicitly by the fits (GUI option): the refits run in worker
-    # processes, which would not see a change of the module constant
+    # Passed explicitly by the fits (GUI options): the refits run in worker
+    # processes, which would not see a change of the module constants
     accept_only_improving = (
         ACCEPT_ONLY_IMPROVING if accept_only_improving is None else accept_only_improving
     )
+    asymmetry_spread = ASYMMETRY_SPREAD if asymmetry_spread is None else asymmetry_spread
     x0_fit = spectrum.peaks[peak].x0_refined
     sigma_L_fit = spectrum.peaks[peak].sigma_L
     sigma_R_fit = spectrum.peaks[peak].sigma_R
@@ -361,6 +396,10 @@ def refine_iteration(
             elif sigma_R_fit < neighbor_R_median / max_width_ratio:
                 deficit = neighbor_R_median / max_width_ratio - sigma_R_fit
                 sigma_R_fit = neighbor_R_median / max_width_ratio - deficit * softness
+
+        sigma_L_fit, sigma_R_fit = _limit_asymmetry(
+            sigma_L_fit, sigma_R_fit, _median_log_asymmetry(spectrum), asymmetry_spread
+        )
 
     alpha_A = 0.4 if alpha > 0.4 else alpha
     q = spectrum.peaks[peak]

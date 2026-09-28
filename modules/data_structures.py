@@ -310,9 +310,6 @@ class FitQualityPeakMetrics:
     peak_rmse: float
     relative_error: float
     r_squared: float
-    # Mean squared residual over the peak's region / noise variance: ~1 = fitted to
-    # within the noise; NaN when not computed (older files)
-    residual_noise: float = float("nan")
 
 
 @dataclass
@@ -424,7 +421,6 @@ def upgrade_peak_params(old: peak_params) -> peak_params:
         peak_rmse=quality.get("peak_rmse", 0.0),
         relative_error=quality.get("relative_error", 1.0),
         r_squared=quality.get("r_squared", 0.0),
-        residual_noise=quality.get("residual_noise", float("nan")),
     )
     return peak
 

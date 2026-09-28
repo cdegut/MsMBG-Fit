@@ -24,15 +24,9 @@ from modules.fitting.fitting_quality import (
     CONVERGENCE_WINDOW,
     R2_FLAT_WINDOW,
     laplace_covariance_analysis,
-    residual_noise_ratio,
-    residual_noise_sigma,
 )
 from modules.rendercallback import get_global_render_callback_ref
 import seaborn as sns
-
-# Residual / noise over a peak region: ~1 is noise-level; warn / flag above these
-RESIDUAL_NOISE_WARN = 1.5
-RESIDUAL_NOISE_BAD = 2.0
 
 # Fitted peaks are coloured by relative error, from 0 to ERROR_COLOR_MAX
 PEAK_COLORS = sns.color_palette("plasma", 20)
@@ -51,7 +45,6 @@ PEAK_TABLE_COLUMNS = [
     ("Integral", "integral", 0.9),
     ("Share %", "share", 0.6),
     ("Rel. error", "rel_error", 0.6),
-    ("Resid./noise", "residual_noise", 0.6),
     ("SNR", "snr", 0.5),
     ("Area corr. L / R", "area_corr", 1.1),
     ("Flags", None, 1.75),
@@ -429,14 +422,6 @@ def peak_flags(spectrum: MSData, peak: int) -> list[tuple[str, str]]:
                 "(hidden in matching when 'Hide bad peaks' is on)",
             )
         )
-    if q.residual_noise > RESIDUAL_NOISE_BAD:
-        flags.append(
-            (
-                "local misfit",
-                f"Residual over the peak region = {q.residual_noise:.1f}x the noise variance "
-                f"(> {RESIDUAL_NOISE_BAD:g}): the model does not follow the data here",
-            )
-        )
     if q.snr < 3:
         flags.append(("low SNR", f"Peak height / local residual noise = {q.snr:.1f} (< 3)"))
     if p.sampling_rate > 0 and min(p.sigma_L, p.sigma_R) < p.sampling_rate * 4:
@@ -587,22 +572,6 @@ def error_breakdown(total: float, bootstrap: float, laplace: float, restart: flo
     )
 
 
-def fill_residual_noise(spectrum: MSData, peaks: list[int]):
-    """Compute the residual / noise ratio of peaks fitted before it existed (older files)."""
-    missing = [p for p in peaks if not np.isfinite(spectrum.peaks[p].fit_quality.residual_noise)]
-    data = spectrum.baseline_corrected
-    if not missing or data is None or len(data) < 3:
-        return
-    x, y = data[:, 0], data[:, 1]
-    residual = y - spectrum.calculate_mbg(x, fitting=True)
-    noise_sigma = residual_noise_sigma(residual)
-    for peak in missing:
-        p = spectrum.peaks[peak]
-        p.fit_quality.residual_noise = residual_noise_ratio(
-            x, residual, p.x0_refined, p.sigma_L, p.sigma_R, noise_sigma
-        )
-
-
 def update_peak_table(spectrum: MSData):
     update_fit_summary()
     update_error_analysis_status(spectrum)
@@ -618,7 +587,6 @@ def update_peak_table(spectrum: MSData):
         else:
             p.integral = bi_gaussian_integral(p.A_refined, p.sigma_L, p.sigma_R)
     total_integral = sum(spectrum.peaks[peak].integral for peak in fitted_peaks)
-    fill_residual_noise(spectrum, fitted_peaks)
 
     for peak in fitted_peaks:
         p = spectrum.peaks[peak]
@@ -641,9 +609,6 @@ def update_peak_table(spectrum: MSData):
             "integral": p.integral,
             "share": share,
             "rel_error": q.relative_error,
-            "residual_noise": (
-                q.residual_noise if np.isfinite(q.residual_noise) else -1.0
-            ),
             "snr": q.snr if np.isfinite(q.snr) else 1e12,
             "area_corr": p.laplace_area_corr,
         }
@@ -718,22 +683,6 @@ def update_peak_table(spectrum: MSData):
                 f"{q.relative_error:.4f}",
                 quality_theme(q.relative_error, 0.05, 0.15, higher_is_better=False),
             )
-            if np.isfinite(q.residual_noise):
-                add_themed_text(
-                    f"{q.residual_noise:.2f}",
-                    quality_theme(
-                        q.residual_noise,
-                        RESIDUAL_NOISE_WARN,
-                        RESIDUAL_NOISE_BAD,
-                        higher_is_better=False,
-                    ),
-                    "Mean squared residual over the peak region (apex - 3 sigma L to apex + 3 "
-                    "sigma R) / noise variance (MAD of the whole residual). ~1: fitted to within "
-                    f"the noise; above {RESIDUAL_NOISE_BAD:g}: local misfit (wrong shape, missing "
-                    "or extra peak). Overlap with neighbours does not lower it, unlike a local R².",
-                )
-            else:
-                add_themed_text("n/a", "text_muted_theme")
             add_themed_text(f"{q.snr:.1f}", quality_theme(q.snr, 10, 3))
             if p.laplace_se_integral >= 0:
                 sides = [

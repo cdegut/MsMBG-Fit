@@ -154,6 +154,22 @@ def combine_errors(noise: list[float], restart: float) -> float:
     return float(max([0.0] + [v for v in [*noise, restart] if v > 0]))
 
 
+def correlated_noise(residual: np.ndarray) -> np.ndarray:
+    """
+    Random noise with the same power spectrum as the residual (phase-randomised
+    surrogate): same variance and same autocorrelation, new random realisation.
+    Used by the parametric bootstrap instead of white noise, so that refits see
+    noise as correlated between neighbouring points as the real residual.
+    """
+    r = np.asarray(residual, dtype=float) - np.mean(residual)
+    spectrum = np.fft.rfft(r)
+    phases = np.exp(2j * np.pi * np.random.random(len(spectrum)))
+    phases[0] = 1.0  # zero frequency: keeps the mean (0)
+    if len(r) % 2 == 0:
+        phases[-1] = 1.0  # Nyquist term must stay real
+    return np.fft.irfft(spectrum * phases, len(r))
+
+
 def bootstrap_std(values: list[float]) -> float:
     """
     Standard error of a parameter estimated by resampling (bootstrap, random

@@ -1,3 +1,5 @@
+import os
+from typing import Optional
 import dearpygui.dearpygui as dpg
 from modules.data_structures import MSData
 from modules.finding_callback import set_smoothing_window
@@ -148,6 +150,15 @@ def file_dialog_save_data(render_callback):
         dpg.add_file_extension(".pkl", color=(54, 92, 45, 255), custom_text="[pkl]")
 
 
+APP_TITLE = "Multi Bi Gaussian Fit"
+
+
+def show_dataset_name(path: str, sheet: Optional[str] = None):
+    """Window title: application name and the current dataset file."""
+    name = os.path.basename(path) + (f" [{sheet}]" if sheet else "")
+    dpg.set_viewport_title(f"{APP_TITLE} - {name}")
+
+
 def open_file_callback(sender, app_data, user_data):
     render_callback = user_data
     spectrum: MSData = user_data.spectrum
@@ -158,6 +169,7 @@ def open_file_callback(sender, app_data, user_data):
         dpg.show_item("file_loading_indicator")
         data = pd.read_csv(app_data["file_path_name"])
         finalise_loading(data, render_callback)
+        show_dataset_name(app_data["file_path_name"])
 
     elif extension == "xlsx" or extension == "xls":
         load_excel(app_data["file_path_name"], render_callback)
@@ -172,6 +184,7 @@ def open_pkl_callback(sender, app_data, user_data):
         log("This file contains no spectrum data (empty session saved?)")
         return
     initialise_windows(render_callback)
+    show_dataset_name(app_data["file_path_name"])
 
 
 def save_pkl_callback(sender, app_data, user_data):
@@ -179,6 +192,7 @@ def save_pkl_callback(sender, app_data, user_data):
     spectrum: MSData = user_data.spectrum
     log(f"Path: {app_data['file_path_name']}")
     spectrum.save_to_file(app_data["file_path_name"])
+    show_dataset_name(app_data["file_path_name"])
 
 
 def load_excel(file_path, render_callback):
@@ -189,6 +203,7 @@ def load_excel(file_path, render_callback):
         data = pd.read_excel(file_path)
         dpg.show_item("file_loading_indicator")
         finalise_loading(data, render_callback)
+        show_dataset_name(file_path)
     else:
         sheet_names = xls.sheet_names
         show_sheet_selector(file_path, sheet_names, render_callback)
@@ -212,6 +227,7 @@ def load_sheet(file_path, render_callback):
     dpg.show_item("file_loading_indicator")
     data = pd.read_excel(file_path, sheet_name=selected_sheet)
     finalise_loading(data, render_callback)
+    show_dataset_name(file_path, selected_sheet)
 
 
 def finalise_loading(df: pd.DataFrame, render_callback):

@@ -6,6 +6,7 @@ from modules.finding_dpg import finding_window
 
 # from modules.intialise import initialise_windows
 from modules.intialise import (
+    APP_TITLE,
     file_dialog,
     file_dialog_save_data,
     file_dialog_load_saved_data,
@@ -101,9 +102,7 @@ def main():
     """
     #####
     # dpg.show_style_editor()
-    dpg.create_viewport(
-        title="Multi Bi Gaussian Fit", width=1450, height=1000, x_pos=0, y_pos=0
-    )
+    dpg.create_viewport(title=APP_TITLE, width=1450, height=1000, x_pos=0, y_pos=0)
     dpg.setup_dearpygui()
     dpg.show_viewport()
     # spectrum.import_csv(path)

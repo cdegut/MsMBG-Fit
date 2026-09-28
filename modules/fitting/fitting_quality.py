@@ -20,6 +20,7 @@ from modules.math import (
     bi_Lorentzian,
     bootstrap_std,
     combine_errors,
+    correlated_noise,
 )
 from modules.rendercallback import RenderCallback
 from modules.utils import log
@@ -402,11 +403,7 @@ def advanced_statistical_analysis(
                 if dpg.does_alias_exist("noise"):
                     dpg.delete_item("noise")
 
-                noise = np.random.normal(
-                    0, sigma_hat, size=len(spectrum.working_data[:, 0])
-                )
-
-                noise = noise + y_fitted
+                noise = correlated_noise(residuals) + y_fitted
                 dpg.add_line_series(
                     spectrum.working_data[:, 0].tolist(),
                     noise.tolist(),
@@ -823,8 +820,9 @@ def _make_bootstrap_task(
         noise_scale_w = 0.02 * rescale
 
         if method == "bootstrap-parametric":
-            noise = np.random.normal(0, sigma_hat, size=len(residuals))
-            task_data_y = y_fitted + noise
+            # Same spectrum as the residual, not white: neighbouring points of
+            # the residual are correlated, white noise would understate the errors
+            task_data_y = y_fitted + correlated_noise(residuals)
 
         else:  # residual bootstrap
             bootstrap_indices = np.random.choice(
@@ -1101,9 +1099,13 @@ def laplace_covariance_analysis(step=1e-4, rcond=1e-10) -> dict[int, dict]:
     Parameters are log(integral), x0 / width, log(sigma_L), log(sigma_R), so the
     covariance of log(integral) is directly the relative error of the integral and
     the result does not depend on the units of each parameter.
-    s is the robust (MAD) noise estimate of the residual, as in the parametric
-    bootstrap. The errors are therefore the precision limited by noise: systematic
-    misfit of the peak shape (structured residual) is not included.
+    s is the robust (MAD) noise estimate of the residual, and the noise is taken as
+    independent on every point. The residual is in fact correlated between
+    neighbouring points (oversampled profile, smooth misfit), so these errors are a
+    lower bound, typically 2-3x too small; the parametric bootstrap, whose noise
+    has the spectrum of the residual, measures the real effect. Scaling by the
+    correlation time of the residual was tried: it counts the smooth misfit as
+    noise and overstates the errors 3-6x compared with that bootstrap.
     The correlations do not depend on s.
 
     Per peak, stores the integral relative standard error, the apex standard error

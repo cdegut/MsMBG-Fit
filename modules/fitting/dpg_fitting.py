@@ -305,7 +305,7 @@ def fitting_window(render_callback):
         dpg.add_text(
             "Peak colour = relative error (same as the plot). Green/orange/red = good/check/poor. "
             "Click a peak to zoom on it, double-click the plot to reset. "
-            "± = Laplace error right after a fit (noise only, lower bound), final error after the bootstrap analysis. Area corr. L / R = integral correlation with the left / right neighbour (near -1: area split undetermined). Hover cells and Flags for details.",
+            "± = Laplace error right after a fit (white noise, lower bound), final error after the bootstrap analysis. Area corr. L / R = integral correlation with the left / right neighbour (near -1: area split undetermined). Hover cells and Flags for details.",
             wrap=1400,
         )
         dpg.bind_item_theme(dpg.last_item(), "text_muted_theme")

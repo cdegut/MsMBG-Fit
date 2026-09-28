@@ -570,6 +570,13 @@ def update_error_analysis_status(spectrum: MSData):
     dpg.bind_item_theme("error_analysis_status", theme or 0)
 
 
+LAPLACE_ONLY_TOOLTIP = (
+    "Laplace only (white noise, a lower bound: usually 2-3x too small because "
+    "neighbouring points of the residual are correlated). Run the final error "
+    "analysis: its bootstrap uses correlated noise and it includes random restarts."
+)
+
+
 def error_breakdown(total: float, bootstrap: float, laplace: float, restart: float, fmt) -> str:
     def show(v):
         return fmt(v) if v > 0 else "n/a"
@@ -682,7 +689,7 @@ def update_peak_table(spectrum: MSData):
                         lambda v: f"{v:.2f} m/z",
                     )
                     if has_error_components(p)
-                    else "Laplace only (noise-limited, a lower bound). Run the final error analysis to include random restarts."
+                    else LAPLACE_ONLY_TOOLTIP
                 ),
             )
             add_themed_text(with_se(regression_0, p.se_base))
@@ -690,7 +697,7 @@ def update_peak_table(spectrum: MSData):
             add_themed_text(with_se(p.sigma_R, p.se_sigma_R))
             if p.se_integral > 0 and p.integral > 0:
                 se_pct = p.se_integral / p.integral * 100
-                breakdown = "Laplace only (noise-limited, a lower bound). Run the final error analysis to include random restarts."
+                breakdown = LAPLACE_ONLY_TOOLTIP
                 if has_error_components(p):
                     breakdown = error_breakdown(
                         p.se_integral,

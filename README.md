@@ -261,7 +261,8 @@ where:
 
 ### Statistical Analysis
 
--   **Parametric Bootstrap**: Resampling with added Gaussian noise
+-   **Laplace errors**: linearised errors of the fit with white noise, a quick lower bound
+-   **Parametric Bootstrap**: Refits with added noise that has the same spectrum as the residual (correlated, not white)
 -   **Residual Bootstrap**: Resampling of fit residuals
 -   **Random Start Analysis**: Multiple fits with perturbed initial conditions
 -   **Standard Error Calculation**: Robust uncertainty quantification

@@ -1,14 +1,16 @@
 from dataclasses import dataclass
 import re
 from turtle import mode
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import dearpygui.dearpygui as dpg
 import numpy as np
 from modules.rendercallback import RenderCallback, get_global_render_callback_ref
-from modules.math import bi_gaussian, bi_Lorentzian
+from modules.math import bi_gaussian, bi_Lorentzian, random_effects_mean
 from modules.var import colors_list
 from modules.dpg_style import peak_label_color
 from modules.data_structures import MSData, MatchedWith, get_global_msdata_ref
+
+PROTON_MASS = 1.007276  # Da
 
 
 def draw_mz_lines(sender, app_data, user_data: int):
@@ -35,7 +37,7 @@ def draw_mz_lines(sender, app_data, user_data: int):
         z = charges - i
         if z == 0:
             break
-        mz = (mw + z * 0.007) / z
+        mz = (mw + z * PROTON_MASS) / z
         mz_l.append(mz)
         z_l.append(z)
         z_mz.append((z, mz))
@@ -380,8 +382,66 @@ def analyze_series(k: int):
     return mode_count
 
 
+@dataclass
+class SeriesMass:
+    mass: float
+    se: float  # nan when it cannot be estimated (one peak without error analysis)
+    n: int
+    sd: float  # spread of the per-peak masses across charge states, nan for one peak
+
+
+def series_mass(spectrum: MSData, k: int) -> Optional[SeriesMass]:
+    """
+    Mass of series k from its matched peaks. Each peak gives z (onset - proton
+    mass), with the onset (Start m/z, the leading edge) also used for matching:
+    the apex is shifted up by adducts. The masses are averaged with random-effects
+    weights (see random_effects_mean; errors of the onset from the error analysis,
+    plain mean before it): adducts and peak shape can differ between charge states
+    beyond the per-peak errors, and the most precise peaks must not then dominate.
+    Uncertainty, conservatively: the larger of the random-effects error and the
+    spread across charge states / sqrt(n).
+    """
+    masses, errors = [], []
+    for p in spectrum.peaks.values():
+        if not p.fitted or p.regression_fct[0] == 0:
+            continue
+        for m in p.matched_with:
+            if m.set == k:
+                onset = -p.regression_fct[1] / p.regression_fct[0]
+                masses.append(m.charge * (onset - PROTON_MASS))
+                errors.append(m.charge * p.se_base if p.se_base > 0 else -1.0)
+                break
+    if not masses:
+        return None
+    M, E = np.array(masses), np.array(errors)
+    n = len(M)
+    if np.all(E > 0):
+        mass, propagated, _ = random_effects_mean(M, E)
+    else:
+        mass, propagated = float(np.mean(M)), float("nan")
+    sd = float(np.std(M, ddof=1)) if n > 1 else float("nan")
+    scatter = sd / np.sqrt(n) if n > 1 else float("nan")
+    candidates = [v for v in (propagated, scatter) if np.isfinite(v)]
+    return SeriesMass(mass, max(candidates) if candidates else float("nan"), n, sd)
+
+
+def series_mass_text(estimate: Optional[SeriesMass]) -> str:
+    if estimate is None:
+        return "Mass from peaks: -"
+    text = f"Mass: {estimate.mass:.0f}"
+    if np.isfinite(estimate.se):
+        text += f" ± {estimate.se:.0f}"
+    text += f" Da ({estimate.n} pk"
+    if np.isfinite(estimate.sd):
+        text += f", SD {estimate.sd:.0f}"
+    return text + ")"
+
+
 def matching_quality(render_callback: RenderCallback):
     for k in render_callback.mz_lines.keys():
+        dpg.set_value(
+            f"series_mass_{k}", series_mass_text(series_mass(render_callback.spectrum, int(k)))
+        )
         quality_metrics = calculate_quality_score(render_callback, k)
 
         if quality_metrics.peaks > 1:
@@ -681,7 +741,10 @@ def print_to_terminal():
             )
 
     for group, peaks in grouped_peaks.items():
-        print(f"Mass group {group}: M: {peaks[0]['matched_with'].mw:.2f}")
+        print(
+            f"Mass group {group}: MW set {dpg.get_value(f'molecular_weight_{group}')}, "
+            + series_mass_text(series_mass(spectrum, group))
+        )
         ordered_peaks = sorted(
             peaks, key=lambda x: x["matched_with"].charge, reverse=True
         )

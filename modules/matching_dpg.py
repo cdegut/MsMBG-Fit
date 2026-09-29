@@ -167,6 +167,17 @@ def peak_matching_window(render_callback: RenderCallback, i):
                 user_data=i,
             )
         dpg.add_text("", tag=f"MW_diff_{i}")
+        dpg.add_text("", tag=f"series_mass_{i}")
+        with dpg.tooltip(f"series_mass_{i}"):
+            dpg.add_text(
+                "Mass from the matched peaks: z x (Start m/z - proton mass) per peak, "
+                "random-effects weighted mean: weights 1 / (error² + tau²), tau the "
+                "spread between charge states beyond the per-peak errors (plain mean "
+                "before the error analysis). ± = the larger of the random-effects error "
+                "and the spread across charge states / sqrt(n). SD = spread of the "
+                "per-peak masses.",
+                wrap=350,
+            )
         dpg.add_checkbox(
             default_value=False,
             tag=f"compare_checkbox_{i}",

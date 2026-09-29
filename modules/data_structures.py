@@ -310,6 +310,9 @@ class FitQualityPeakMetrics:
     peak_rmse: float
     relative_error: float
     r_squared: float
+    # Shape misfit / peak height with the noise removed (see excess_misfit in
+    # fitting_quality); NaN when not computed (older files)
+    excess_misfit: float = float("nan")
 
 
 @dataclass
@@ -343,8 +346,10 @@ class MatchedWith:
     ratio: float
 
 
-# Relative error above which a peak counts as bad unless the user decided otherwise
+# Misfit (excess_misfit) above which a peak counts as bad unless the user decided otherwise
 HIGH_ERROR_THRESHOLD = 0.15
+# Peak height / noise below which a peak is too weak to judge its shape
+LOW_SNR_THRESHOLD = 3.0
 
 
 @dataclass
@@ -380,16 +385,27 @@ class peak_params:
         default_factory=lambda: FitQualityPeakMetrics(0.0, 0.0, 1.0, 0.0)
     )
     # Bad peak (hidden from matching when 'Hide bad peaks' is on): None = automatic
-    # (relative error above HIGH_ERROR_THRESHOLD), True / False = set by the user.
-    # Reset to automatic by a new fit
+    # (misfit above HIGH_ERROR_THRESHOLD or SNR below LOW_SNR_THRESHOLD),
+    # True / False = set by the user. Reset to automatic by a new fit
     marked_bad: Optional[bool] = None
+
+    @property
+    def misfit(self) -> float:
+        """Excess misfit, or the relative error while it is not computed (older files)."""
+        q = self.fit_quality
+        return q.excess_misfit if np.isfinite(q.excess_misfit) else q.relative_error
+
+    @property
+    def high_misfit(self) -> bool:
+        # Judged on the value shown (2 decimals): further digits are below its precision
+        return bool(round(float(self.misfit), 2) >= HIGH_ERROR_THRESHOLD)
 
     @property
     def is_bad(self) -> bool:
         # bool(): the error is often a numpy float, and dearpygui rejects numpy bools
         if self.marked_bad is not None:
             return bool(self.marked_bad)
-        return bool(self.fit_quality.relative_error > HIGH_ERROR_THRESHOLD)
+        return bool(self.high_misfit or self.fit_quality.snr < LOW_SNR_THRESHOLD)
     # Components of se_integral / se_x0 from the error analysis, -1 when not computed.
     # se_integral = max(bootstrap, Laplace, restarts)
     se_integral_bootstrap: float = -1.0
@@ -421,6 +437,7 @@ def upgrade_peak_params(old: peak_params) -> peak_params:
         peak_rmse=quality.get("peak_rmse", 0.0),
         relative_error=quality.get("relative_error", 1.0),
         r_squared=quality.get("r_squared", 0.0),
+        excess_misfit=quality.get("excess_misfit", float("nan")),
     )
     return peak
 

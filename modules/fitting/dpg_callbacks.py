@@ -8,6 +8,7 @@ from modules.dpg_style import peak_label_color, peak_label_theme
 from modules.rendercallback import RenderCallback
 from modules.data_structures import (
     HIGH_ERROR_THRESHOLD,
+    LOW_SNR_THRESHOLD,
     FitSummary,
     MSData,
     get_global_msdata_ref,
@@ -23,14 +24,20 @@ from modules.math import (
 from modules.fitting.fitting_quality import (
     CONVERGENCE_WINDOW,
     R2_FLAT_WINDOW,
+    excess_misfit,
     laplace_covariance_analysis,
+    noise_sigma,
+    peak_snr,
 )
 from modules.rendercallback import get_global_render_callback_ref
 import seaborn as sns
 
-# Fitted peaks are coloured by relative error, from 0 to ERROR_COLOR_MAX
+# Fitted peaks are coloured by misfit, from 0 to ERROR_COLOR_MAX. Peaks below
+# LOW_SNR_THRESHOLD are too weak for their misfit to mean anything: they are grey
+# instead, by SNR (lighter = weaker), a scale that never mixes with the misfit one
 PEAK_COLORS = sns.color_palette("plasma", 20)
 ERROR_COLOR_MAX = 1 / 3
+SNR_COLORS = [(g, g, g) for g in np.linspace(215, 95, 10) / 255]
 
 # (header, sort key, width weight) ; sort key None = not sortable
 PEAK_TABLE_COLUMNS = [
@@ -44,7 +51,7 @@ PEAK_TABLE_COLUMNS = [
     ("Sigma R", "sigma_R", 0.7),
     ("Integral", "integral", 0.9),
     ("Share %", "share", 0.6),
-    ("Rel. error", "rel_error", 0.6),
+    ("Misfit", "misfit", 0.6),
     ("SNR", "snr", 0.5),
     ("Area corr. L / R", "area_corr", 1.1),
     ("Flags", None, 1.75),
@@ -52,11 +59,18 @@ PEAK_TABLE_COLUMNS = [
 
 
 def peak_color(peak: peak_params) -> list[int]:
-    normalized_error = np.clip(
-        peak.fit_quality.relative_error / ERROR_COLOR_MAX, 0, 1
-    )
-    color_idx = min(int(normalized_error * len(PEAK_COLORS)), len(PEAK_COLORS) - 1)
-    return [int(c * 255) for c in PEAK_COLORS[color_idx]]
+    """Misfit colour, or grey by SNR for peaks too weak to judge."""
+    if is_low_snr(peak):
+        palette, value = SNR_COLORS, peak.fit_quality.snr / LOW_SNR_THRESHOLD
+    else:
+        palette, value = PEAK_COLORS, peak.misfit / ERROR_COLOR_MAX
+    normalized = np.clip(value, 0, 1) if np.isfinite(value) else 1.0
+    color_idx = min(int(normalized * len(palette)), len(palette) - 1)
+    return [int(c * 255) for c in palette[color_idx]]
+
+
+def is_low_snr(peak: peak_params) -> bool:
+    return bool(peak.fit_quality.snr < LOW_SNR_THRESHOLD)
 
 
 def quality_theme(value: float, good: float, warn: float, higher_is_better=True):
@@ -328,6 +342,7 @@ def draw_fitted_peaks(delete=False):
             dpg.delete_item(alias)
     if delete:
         return
+    fill_peak_metrics(spectrum)
     # Generate fitted curve
     peak_list = []
     mbg_param = []
@@ -414,16 +429,23 @@ def peak_flags(spectrum: MSData, peak: int) -> list[tuple[str, str]]:
     p = spectrum.peaks[peak]
     q = p.fit_quality
     flags = []
-    if q.relative_error > HIGH_ERROR_THRESHOLD:
+    if p.high_misfit:
         flags.append(
             (
                 "high error",
-                f"Relative error > {HIGH_ERROR_THRESHOLD:g}: not ticked 'Good' by default "
-                "(hidden in matching when 'Hide bad peaks' is on)",
+                f"Misfit ≥ {HIGH_ERROR_THRESHOLD:g}: the model shape is off by more than "
+                f"{HIGH_ERROR_THRESHOLD:.0%} of the peak height. Not ticked 'Good' by "
+                "default (hidden in matching when 'Hide bad peaks' is on)",
             )
         )
-    if q.snr < 3:
-        flags.append(("low SNR", f"Peak height / local residual noise = {q.snr:.1f} (< 3)"))
+    if is_low_snr(p):
+        flags.append(
+            (
+                "low SNR",
+                f"Peak height / noise = {q.snr:.1f} (< {LOW_SNR_THRESHOLD:g}): too weak "
+                "to judge its shape (drawn in grey, by SNR). Not ticked 'Good' by default",
+            )
+        )
     if p.sampling_rate > 0 and min(p.sigma_L, p.sigma_R) < p.sampling_rate * 4:
         flags.append(("narrow", "A width is close to its lower clamp (3x sampling rate)"))
     if p.width > 0 and abs(p.x0_refined - p.x0_init) > 0.9 * p.width:
@@ -572,6 +594,29 @@ def error_breakdown(total: float, bootstrap: float, laplace: float, restart: flo
     )
 
 
+def fill_peak_metrics(spectrum: MSData):
+    """
+    Misfit and SNR of peaks fitted before they existed (older files; their stored
+    SNR used the local residual, misfit included, as noise).
+    """
+    missing = [
+        p
+        for p in spectrum.peaks.values()
+        if p.fitted and not p.do_not_fit and not np.isfinite(p.fit_quality.excess_misfit)
+    ]
+    data = spectrum.baseline_corrected
+    if not missing or data is None or len(data) < 3:
+        return
+    x, y = data[:, 0], data[:, 1]
+    residual = y - spectrum.calculate_mbg(x, fitting=True)
+    sigma = noise_sigma(residual)
+    for p in missing:
+        p.fit_quality.excess_misfit = excess_misfit(
+            x, residual, p.x0_refined, p.sigma_L, p.sigma_R, p.A_refined, sigma
+        )
+        p.fit_quality.snr = peak_snr(p.A_refined, sigma)
+
+
 def update_peak_table(spectrum: MSData):
     update_fit_summary()
     update_error_analysis_status(spectrum)
@@ -587,6 +632,7 @@ def update_peak_table(spectrum: MSData):
         else:
             p.integral = bi_gaussian_integral(p.A_refined, p.sigma_L, p.sigma_R)
     total_integral = sum(spectrum.peaks[peak].integral for peak in fitted_peaks)
+    fill_peak_metrics(spectrum)
 
     for peak in fitted_peaks:
         p = spectrum.peaks[peak]
@@ -608,7 +654,7 @@ def update_peak_table(spectrum: MSData):
             "sigma_R": p.sigma_R,
             "integral": p.integral,
             "share": share,
-            "rel_error": q.relative_error,
+            "misfit": p.misfit if np.isfinite(p.misfit) else 1e12,
             "snr": q.snr if np.isfinite(q.snr) else 1e12,
             "area_corr": p.laplace_area_corr,
         }
@@ -635,8 +681,9 @@ def update_peak_table(spectrum: MSData):
                     dpg.add_text(
                         "Good peak: used in matching (series assignment, integral ratios). "
                         "Unticked (bad) peaks are hidden there when 'Hide bad peaks' is on. "
-                        f"Unticked by default when the relative error is above "
-                        f"{HIGH_ERROR_THRESHOLD:g}; your choice is kept until the next fit.",
+                        f"Unticked by default when the misfit is at least "
+                        f"{HIGH_ERROR_THRESHOLD:g} or the SNR below {LOW_SNR_THRESHOLD:g}; "
+                        "your choice is kept until the next fit.",
                         wrap=400,
                     )
             name = dpg.add_selectable(
@@ -680,10 +727,25 @@ def update_peak_table(spectrum: MSData):
                 add_themed_text(f"{p.integral:.0f}")
             add_themed_text(f"{share:.1f}")
             add_themed_text(
-                f"{q.relative_error:.4f}",
-                quality_theme(q.relative_error, 0.05, 0.15, higher_is_better=False),
+                f"{p.misfit:.2f}",
+                (
+                    "text_muted_theme"
+                    if is_low_snr(p)
+                    else "text_bad_theme"
+                    if p.high_misfit
+                    else quality_theme(p.misfit, 0.05, HIGH_ERROR_THRESHOLD, higher_is_better=False)
+                ),
+                "Shape misfit / peak height, noise removed: sqrt(mean residual² - noise²) / "
+                "height over apex - 3 sigma L to apex + 3 sigma R. 0.1 = the model is off by "
+                f"about 10% of the peak. Relative error with the noise included: "
+                f"{q.relative_error:.2f}."
+                + (" Low SNR: too weak for the misfit to mean much." if is_low_snr(p) else ""),
             )
-            add_themed_text(f"{q.snr:.1f}", quality_theme(q.snr, 10, 3))
+            add_themed_text(
+                f"{q.snr:.1f}",
+                quality_theme(q.snr, 10, LOW_SNR_THRESHOLD),
+                "Peak height / noise (MAD of the whole residual)",
+            )
             if p.laplace_se_integral >= 0:
                 sides = [
                     (side, other, r)

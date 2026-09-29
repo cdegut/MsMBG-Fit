@@ -170,6 +170,24 @@ def correlated_noise(residual: np.ndarray) -> np.ndarray:
     return np.fft.irfft(spectrum * phases, len(r))
 
 
+def random_effects_mean(values, errors) -> tuple[float, float, float]:
+    """
+    Random-effects weighted mean (DerSimonian-Laird): mean, standard error and tau,
+    the spread between values beyond their own errors. Weights are
+    1 / (error² + tau²): inverse-variance weights when the values agree within their
+    errors (tau = 0), close to equal weights when they differ systematically, so
+    the most precise values do not dominate a mean they disagree with.
+    """
+    x, e = np.asarray(values, dtype=float), np.asarray(errors, dtype=float)
+    w = 1 / e**2
+    fixed = np.sum(w * x) / np.sum(w)
+    q = np.sum(w * (x - fixed) ** 2)
+    denominator = np.sum(w) - np.sum(w**2) / np.sum(w)
+    tau2 = max(0.0, (q - (len(x) - 1)) / denominator) if denominator > 0 else 0.0
+    w = 1 / (e**2 + tau2)
+    return float(np.sum(w * x) / np.sum(w)), float(1 / np.sqrt(np.sum(w))), float(np.sqrt(tau2))
+
+
 def bootstrap_std(values: list[float]) -> float:
     """
     Standard error of a parameter estimated by resampling (bootstrap, random

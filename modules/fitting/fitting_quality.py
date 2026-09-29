@@ -73,6 +73,32 @@ class FitQualityMetricsReduced:
     sigma_R_std: float = 0.0
 
 
+def noise_sigma(residual) -> float:
+    """Robust (MAD) noise estimate of the residual, as in the Laplace analysis."""
+    return float(1.4826 * np.median(np.abs(residual - np.median(residual))))
+
+
+def excess_misfit(data_x, residual, x0, sigma_L, sigma_R, A, sigma) -> float:
+    """
+    Shape misfit of a peak relative to its height, with the noise removed:
+    sqrt(max(mean r² - sigma², 0)) / A over the peak region (x0 - 3 sigma_L to
+    x0 + 3 sigma_R), sigma the noise of the whole residual.
+    The residual RMS / A alone is about noise / A = 1 / SNR on a well fitted peak,
+    so it mostly flags weak peaks; without the noise it measures only how far the
+    model shape is from the data, as a fraction of the peak. A noise-dominated peak
+    gets ~0: whether it is strong enough to judge is the SNR's job.
+    """
+    region = (data_x >= x0 - 3 * sigma_L) & (data_x <= x0 + 3 * sigma_R)
+    if not np.any(region) or A <= 0:
+        return float("inf")
+    return float(np.sqrt(max(np.mean(np.square(residual[region])) - sigma**2, 0.0)) / A)
+
+
+def peak_snr(A, sigma) -> float:
+    """Peak height / noise of the whole residual (the misfit is not counted as noise)."""
+    return float(A / sigma) if sigma > 0 else float("inf")
+
+
 @overload
 def calculate_fit_quality_metrics(
     data_x,
@@ -176,6 +202,7 @@ def calculate_fit_quality_metrics(
 
     # 4. Peak-specific metrics
     peak_quality = {}
+    sigma = noise_sigma(residual)
     for peak in working_peak_list:
         x0 = spectrum.peaks[peak].x0_refined
         sigma_L = spectrum.peaks[peak].sigma_L
@@ -187,10 +214,7 @@ def calculate_fit_quality_metrics(
             peak_residual = residual[peak_mask]
             peak_data = data_y[peak_mask]
 
-            # Signal-to-noise ratio at peak
             peak_height = spectrum.peaks[peak].A_refined
-            noise_level = np.std(peak_residual)
-            snr = peak_height / noise_level if noise_level > 0 else np.inf
 
             # Peak RMSE
             peak_rmse = np.sqrt(np.mean(np.square(peak_residual)))
@@ -201,10 +225,13 @@ def calculate_fit_quality_metrics(
             peak_r_squared = 1 - (ss_res_peak / ss_tot_peak) if ss_tot_peak > 0 else 0
 
             peak_quality[peak] = FitQualityPeakMetrics(
-                snr=snr,
+                snr=peak_snr(peak_height, sigma),
                 peak_rmse=peak_rmse,
                 relative_error=(peak_rmse / peak_height if peak_height > 0 else np.inf),
                 r_squared=peak_r_squared,
+                excess_misfit=excess_misfit(
+                    data_x, residual, x0, sigma_L, sigma_R, peak_height, sigma
+                ),
             )
 
     # 5. Akaike Information Criterion (AIC)

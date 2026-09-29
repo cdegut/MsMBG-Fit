@@ -267,6 +267,11 @@ def fitting_window(render_callback):
                 qualitative=True,
                 tag="peak_error_colormap",
             )
+            dpg.add_colormap(
+                [[int(c * 255) for c in col] + [255] for col in SNR_COLORS],
+                qualitative=True,
+                tag="peak_snr_colormap",
+            )
 
         with dpg.group(horizontal=True):
             with dpg.table(
@@ -294,7 +299,7 @@ def fitting_window(render_callback):
                         default_sort=key == "apex",
                     )
             dpg.add_colormap_scale(
-                label="Rel. error",
+                label="Misfit",
                 colormap="peak_error_colormap",
                 min_scale=0.0,
                 max_scale=ERROR_COLOR_MAX,
@@ -302,8 +307,17 @@ def fitting_window(render_callback):
                 width=80,
                 format="%.2f",
             )
+            dpg.add_colormap_scale(
+                label="SNR (weak)",
+                colormap="peak_snr_colormap",
+                min_scale=0.0,
+                max_scale=LOW_SNR_THRESHOLD,
+                height=320,
+                width=80,
+                format="%.1f",
+            )
         dpg.add_text(
-            "Peak colour = relative error (same as the plot). Green/orange/red = good/check/poor. "
+            "Peak colour = misfit, the shape error as a fraction of the peak height with the noise removed (same as the plot); grey = SNR below 3, too weak to judge its shape, shaded by SNR (lighter = weaker). Green/orange/red = good/check/poor. "
             "Click a peak to zoom on it, double-click the plot to reset. "
             "± = Laplace error right after a fit (white noise, lower bound), final error after the bootstrap analysis. Area corr. L / R = integral correlation with the left / right neighbour (near -1: area split undetermined). Hover cells and Flags for details.",
             wrap=1400,

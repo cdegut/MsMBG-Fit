@@ -339,7 +339,7 @@ def refine_peak_parameters(
 
     signal_to_noise = full_quality_metrics.signal_to_noise
     peaks_error = [
-        full_quality_metrics.peak_quality[peak].relative_error
+        full_quality_metrics.peak_quality[peak].excess_misfit
         for peak in working_peak_list
         if peak in full_quality_metrics.peak_quality
     ]
@@ -373,7 +373,7 @@ def refine_peak_parameters(
     dpg.set_value(
         "Fitting_indicator_text",
         f"{stop_reason_text(fit_summary)} after {k} iterations. wRMSE={current_metric:.4f}, R²={r_squared:.4f}, "
-        f"X²r={chi_squared:.3f}, Median peak error={median_error:.4f}, Time: {time_taken:.2f}s",
+        f"X²r={chi_squared:.3f}, Median peak misfit={median_error:.4f}, Time: {time_taken:.2f}s",
     )
     render_callback.iterations_done = k
 

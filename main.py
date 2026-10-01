@@ -13,6 +13,7 @@ from modules.intialise import (
 )
 from modules.rendercallback import RenderCallback, get_global_render_callback_ref
 from modules.dpg_style import create_styles
+from modules.svg_export import create_svg_dialog
 from modules.data_structures import get_global_msdata_ref
 
 
@@ -29,6 +30,7 @@ def main():
     file_dialog(render_callback)
     file_dialog_load_saved_data(render_callback)
     file_dialog_save_data(render_callback)
+    create_svg_dialog()
 
     with dpg.window(
         label="Control",

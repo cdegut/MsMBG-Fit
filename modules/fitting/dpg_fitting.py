@@ -1,6 +1,7 @@
 import dearpygui.dearpygui as dpg
 from modules.fitting.MBGfit import BOOTSTRAP_SAMPLES, RESTART_SAMPLES
 from modules.fitting.dpg_callbacks import *
+from modules.svg_export import add_export_button
 
 
 def fitting_window(render_callback):
@@ -47,6 +48,7 @@ def fitting_window(render_callback):
                 default_value=False,
             )
             dpg.add_button(label="Redraw Peaks", callback=draw_fitted_peaks_callback)
+            add_export_button("gaussian_fit_plot")
             # Progress and result of the last fit / analysis: right under the plot,
             # so it stays visible while fitting
             dpg.add_loading_indicator(

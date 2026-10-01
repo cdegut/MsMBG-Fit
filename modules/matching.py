@@ -500,12 +500,29 @@ def refine_matching(sender, app_data, user_data: int):
 
 
 def check_mass_difference(render_callback: RenderCallback):
+seems    """
+    Mass difference with the compared set, from the masses estimated from the
+    matched peaks (errors added in quadrature: different peaks, independent);
+    from the MW fields when a set has no matched peak.
+    """
+    spectrum = render_callback.spectrum
     for k in range(0, 10):
-        mw_set_i = dpg.get_value(f"compare_set_{k}")
-        mw_set1 = dpg.get_value(f"molecular_weight_{mw_set_i}")
-        mw = dpg.get_value(f"molecular_weight_{k}")
-        diff = mw - mw_set1
-        dpg.set_value(f"MW_diff_{k}", f"d{diff}")
+        other = int(dpg.get_value(f"compare_set_{k}"))
+        this_mass, other_mass = series_mass(spectrum, k), series_mass(spectrum, other)
+        if other == k:
+            text = "dM: 0 Da (same set)"
+        elif this_mass is not None and other_mass is not None:
+            text = f"dM: {this_mass.mass - other_mass.mass:.0f}"
+            se = np.hypot(this_mass.se, other_mass.se)
+            if np.isfinite(se):
+                text += f" ± {se:.0f}"
+            text += " Da (from peaks)"
+        else:
+            diff = dpg.get_value(f"molecular_weight_{k}") - dpg.get_value(
+                f"molecular_weight_{other}"
+            )
+            text = f"dMW: {diff} Da (set values)"
+        dpg.set_value(f"MW_diff_{k}", text)
     check_integral_ratio()
 
 

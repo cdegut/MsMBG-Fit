@@ -11,6 +11,7 @@ from modules.matching import (
 )
 from modules.data_structures import get_global_msdata_ref
 from modules.var import colors_list
+from modules.svg_export import add_export_button
 
 
 def matching_window(render_callback: RenderCallback):
@@ -90,6 +91,7 @@ def matching_window(render_callback: RenderCallback):
                     callback=print_to_terminal,
                     user_data=render_callback,
                 )
+                add_export_button("peak_matching_plot")
 
             with dpg.child_window(
                 height=240,

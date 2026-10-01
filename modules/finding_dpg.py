@@ -5,6 +5,7 @@ from modules.finding import peaks_clear_callback, peaks_finder_callback, add_pea
 from modules.rendercallback import RenderCallback, get_global_render_callback_ref
 import numpy as np
 from modules.finding_callback import get_smoothing_window, set_smoothing_window
+from modules.svg_export import add_export_button
 
 
 def finding_window(render_callback):
@@ -84,6 +85,7 @@ def finding_window(render_callback):
             dpg.add_line_series(
                 [], [], label="2nd Order Derivative", parent=y_axis, tag="derivative2nd"
             )
+        add_export_button("data_plot")
 
         with dpg.group(horizontal=True, horizontal_spacing=50):
             with dpg.child_window(height=230, width=300):

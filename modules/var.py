@@ -1,7 +1,3 @@
-import matplotlib.pyplot as plt
-
-# colors_list = [(250,198,129), (129,198,129), (129,198,198), (198,129,198), (198,129,129), (129,129,198), (198,198,129), (129,129,129)]
-# colors_list = [(int(r*255), int(g*255), int(b*255)) for r, g, b in plt.cm.tab10.colors]
 colors_list = [
     (31, 119, 180),  # Blue
     (255, 127, 14),  # Orange
